@@ -24,14 +24,24 @@
 .DS_Store
 *.pem
 
+# local databases
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# uploaded source documents
+/storage
+
 # debug
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-# env files (can opt-in for committing if needed)
+# env files — real secrets stay local, the template is tracked
 .env*
+!.env.example
 
 # vercel
 .vercel

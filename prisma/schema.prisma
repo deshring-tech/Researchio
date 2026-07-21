@@ -1,0 +1,252 @@
+// Researchio data model.
+//
+// Design notes:
+// - SQLite is the default datasource. Prisma does not support `enum` on SQLite,
+//   so status-like columns are `String` and constrained in TypeScript via the
+//   unions in `src/lib/domain/constants.ts`. Switching to PostgreSQL requires
+//   changing `provider` below and regenerating migrations; no field types change.
+// - `Chunk` is the retrieval unit for RAG. Embeddings are stored as raw
+//   little-endian Float32 (`Bytes`), which is ~5x smaller and faster to decode
+//   than a JSON array of numbers.
+// - `Chunk.projectId` is intentionally denormalized from its parent Note/Paper.
+//   Retrieval always filters by project, and this keeps that query index-only
+//   instead of joining through two optional parents. Chunks are immutable and
+//   cascade-deleted with their source, so the duplication cannot drift.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Identity
+// ---------------------------------------------------------------------------
+
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  name         String
+  passwordHash String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  sessions Session[]
+  projects Project[]
+}
+
+/// Server-side sessions. Only the SHA-256 hash of the session token is stored,
+/// so a database leak does not yield usable credentials.
+model Session {
+  id        String   @id @default(uuid())
+  tokenHash String   @unique
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+// ---------------------------------------------------------------------------
+// Workspace
+// ---------------------------------------------------------------------------
+
+model Project {
+  id      String @id @default(uuid())
+  ownerId String
+  owner   User   @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+
+  name String
+  /// The central question the project answers. Used to ground AI drafting.
+  researchQuestion String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  document       LivingDocument?
+  notes          Note[]
+  papers         Paper[]
+  chunks         Chunk[]
+  chatMessages   ChatMessage[]
+  timelineEvents TimelineEvent[]
+
+  @@index([ownerId, updatedAt])
+}
+
+model LivingDocument {
+  id        String  @id @default(uuid())
+  projectId String  @unique
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  /// One of DOCUMENT_TYPES: Thesis, Dissertation, Journal Paper, ...
+  type      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  sections Section[]
+}
+
+model Section {
+  id         String         @id @default(uuid())
+  documentId String
+  document   LivingDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  title String
+  /// Ordinal within the document. Not unique: reordering swaps values in a
+  /// transaction and a unique constraint would make that need temp values.
+  position Int
+
+  /// The researcher's own prose. This is the source of truth for the document.
+  userContent String?
+  /// The latest AI proposal, pending accept/discard. Never rendered as final.
+  aiContent String?
+  /// One of SECTION_STATUSES: incomplete | drafting | reviewing | approved
+  status String @default("incomplete")
+
+  draftedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  citations CitationLink[]
+
+  @@index([documentId, position])
+}
+
+model Note {
+  id        String  @id @default(uuid())
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  content   String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  chunks    Chunk[]
+  citations CitationLink[]
+
+  @@index([projectId, createdAt])
+}
+
+model Paper {
+  id        String  @id @default(uuid())
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  title   String
+  authors String?
+  year    Int?
+
+  /// Filename within the upload directory. Null once a file is pruned.
+  storageKey   String?
+  originalName String
+  mimeType     String
+  sizeBytes    Int
+
+  /// One of INGESTION_STATUSES: pending | processing | ready | failed
+  status String @default("pending")
+  /// Human-readable failure reason when status is `failed`.
+  statusMessage String?
+
+  extractedText String?
+  pageCount     Int?
+
+  // AI-generated analysis, populated during ingestion.
+  plainSummary String?
+  techSummary  String?
+  keyFindings  String?
+  methodology  String?
+  limitations  String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  chunks    Chunk[]
+  citations CitationLink[]
+
+  @@index([projectId, createdAt])
+  @@index([status])
+}
+
+/// A retrievable passage of text with its embedding. Sourced from exactly one
+/// of `paper` or `note`.
+model Chunk {
+  id        String  @id @default(uuid())
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  paperId String?
+  paper   Paper?  @relation(fields: [paperId], references: [id], onDelete: Cascade)
+  noteId  String?
+  note    Note?   @relation(fields: [noteId], references: [id], onDelete: Cascade)
+
+  content String
+  /// Ordinal within the source document, for reassembling reading order.
+  position Int
+  /// Raw little-endian Float32 vector. Null if embedding failed or is pending.
+  embedding Bytes?
+
+  createdAt DateTime @default(now())
+
+  citations CitationLink[]
+
+  @@index([projectId])
+  @@index([paperId])
+  @@index([noteId])
+}
+
+/// Provenance: ties a piece of drafted prose back to the source that grounded
+/// it. This is what separates the Living Document from ungrounded generation.
+model CitationLink {
+  id        String  @id @default(uuid())
+  sectionId String
+  section   Section @relation(fields: [sectionId], references: [id], onDelete: Cascade)
+
+  chunkId String?
+  chunk   Chunk?  @relation(fields: [chunkId], references: [id], onDelete: SetNull)
+  paperId String?
+  paper   Paper?  @relation(fields: [paperId], references: [id], onDelete: SetNull)
+  noteId  String?
+  note    Note?   @relation(fields: [noteId], references: [id], onDelete: SetNull)
+
+  /// Snapshot of the grounding text, retained even if the chunk is deleted.
+  quote String?
+
+  createdAt DateTime @default(now())
+
+  @@index([sectionId])
+}
+
+model ChatMessage {
+  id        String  @id @default(uuid())
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  /// One of CHAT_ROLES: user | assistant
+  role    String
+  content String
+  /// JSON-encoded CitationRef[] captured at answer time.
+  citations String?
+
+  createdAt DateTime @default(now())
+
+  @@index([projectId, createdAt])
+}
+
+model TimelineEvent {
+  id        String  @id @default(uuid())
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  /// One of TIMELINE_EVENT_TYPES.
+  type        String
+  description String
+
+  createdAt DateTime @default(now())
+
+  @@index([projectId, createdAt])
+}
