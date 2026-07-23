@@ -1,0 +1,23 @@
+# Normalize line endings so a Windows author and a macOS/Linux collaborator
+# don't produce whole-file diffs against each other. Text files are stored with
+# LF in the repository; Git converts to the platform's native ending on checkout.
+* text=auto eol=lf
+
+# Windows-only script keeps CRLF so it runs correctly when double-clicked.
+*.bat text eol=crlf
+
+# Treat lockfiles as generated: collapse them in diffs and skip them in
+# language statistics.
+package-lock.json linguist-generated=true -diff
+
+# Binary assets Git must never try to line-normalize.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.pdf binary
+*.db binary
+*.woff binary
+*.woff2 binary
