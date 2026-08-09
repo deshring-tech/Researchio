@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit",
     "verify": "npm run typecheck && npm run lint && npm run build",
     "verify:e2e": "tsx --conditions react-server scripts/verify.ts",
+    "ai:check": "tsx --conditions react-server scripts/ai-check.ts",
     "db:migrate": "prisma migrate dev",
     "db:deploy": "prisma migrate deploy",
     "db:generate": "prisma generate",

@@ -12,6 +12,7 @@ import {
   updateSectionContent,
 } from '@/server/services/document.service';
 import { assertSectionAccess } from '@/server/services/project.service';
+import { RATE_LIMITS, consume } from '@/server/security/rate-limit';
 import { revalidateProject, run } from '@/server/actions/runner';
 import {
   createSectionSchema,
@@ -21,7 +22,7 @@ import {
   setSectionStatusSchema,
   updateSectionSchema,
 } from '@/lib/validation/schemas';
-import type { ActionResult } from '@/lib/errors';
+import { AppError, type ActionResult } from '@/lib/errors';
 
 /**
  * MODULE: server/actions/document
@@ -41,6 +42,18 @@ export async function draftSectionAction(
     // Resolves the owning project and authorizes in one step; `draftSection`
     // returns the prose rather than the id needed for revalidation.
     const projectId = await assertSectionAccess(sectionId, user.id);
+
+    // Drafting retrieves ten passages and runs a long generation, making it the
+    // costliest call in the app. Rate limited per user so a held-down button or
+    // a leaked session cannot drain the provider quota.
+    const limit = consume(`draft:${user.id}`, RATE_LIMITS.draft);
+    if (!limit.ok) {
+      throw new AppError(
+        'RATE_LIMITED',
+        `Too many drafts requested. Try again in ${limit.retryAfterSeconds} seconds.`,
+      );
+    }
+
     await draftSection(user.id, sectionId);
     return projectId;
   });

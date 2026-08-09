@@ -23,15 +23,24 @@ import { unauthorized } from '@/lib/errors';
  *   SHA-256 is correct here (unlike for passwords): the token already has full
  *   entropy, so there is nothing to brute-force and no need for a slow KDF.
  *
+ * Session lifetime
+ *   Fixed at 30 days from sign-in, for both the cookie and the database row,
+ *   which are deliberately kept in agreement.
+ *
+ *   Sliding expiry is *not* implemented. It cannot be done from
+ *   `getCurrentUser`, because that runs during render where Next.js forbids
+ *   cookie writes — extending only the database row would leave the browser
+ *   cookie expiring on the original schedule, so the session would appear to
+ *   renew while users were still logged out on day 30. Implementing it properly
+ *   means renewing from a Server Action or Route Handler; until then the
+ *   behaviour is fixed and honest rather than misleadingly half-built.
+ *
  * Public: `createSession`, `getCurrentUser`, `requireUser`, `destroySession`
  */
 
 const COOKIE_NAME = 'researchio_session';
 const SESSION_DAYS = 30;
 const SESSION_MS = SESSION_DAYS * 24 * 60 * 60 * 1000;
-
-/** Sessions past their halfway point are extended on use, giving sliding expiry. */
-const RENEW_THRESHOLD_MS = SESSION_MS / 2;
 
 export interface SessionUser {
   id: string;
@@ -101,31 +110,8 @@ export const getCurrentUser = cache(async (): Promise<SessionUser | null> => {
     return null;
   }
 
-  await extendIfStale(session.id, session.expiresAt);
-
   return session.user;
 });
-
-/**
- * Slides the expiry of an actively-used session.
- *
- * Failures are swallowed deliberately: this runs during render, where cookie
- * writes are not permitted, and a missed renewal is harmless — the session
- * simply keeps its original expiry.
- */
-async function extendIfStale(sessionId: string, expiresAt: Date): Promise<void> {
-  const remaining = expiresAt.getTime() - Date.now();
-  if (remaining > RENEW_THRESHOLD_MS) {
-    return;
-  }
-
-  await prisma.session
-    .update({
-      where: { id: sessionId },
-      data: { expiresAt: new Date(Date.now() + SESSION_MS) },
-    })
-    .catch(() => undefined);
-}
 
 /** Resolves the signed-in user or throws `UNAUTHORIZED`. */
 export async function requireUser(): Promise<SessionUser> {

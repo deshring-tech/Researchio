@@ -41,14 +41,22 @@ export interface PreparedTurn {
   citations: CitationRef[];
 }
 
+/**
+ * Returns the most recent conversation turns, oldest first.
+ *
+ * The two-step ordering matters: selecting `asc` with a `take` would return the
+ * first N messages ever sent, so a long-running conversation would freeze on
+ * its opening exchanges and the user would never see what they just asked.
+ * Take the newest N by `desc`, then restore reading order.
+ */
 export async function listMessages(projectId: string, limit = 50) {
   const messages = await prisma.chatMessage.findMany({
     where: { projectId },
-    orderBy: { createdAt: 'asc' },
+    orderBy: { createdAt: 'desc' },
     take: limit,
   });
 
-  return messages.map((message) => ({
+  return messages.reverse().map((message) => ({
     id: message.id,
     role: message.role,
     content: message.content,

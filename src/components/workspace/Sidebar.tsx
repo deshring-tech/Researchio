@@ -39,10 +39,17 @@ export function Sidebar({
   const base = `/p/${activeProjectId}`;
 
   const views = [
-    { href: base, label: 'Notebook', icon: '📝' },
-    { href: `${base}/papers`, label: `Sources (${paperCount})`, icon: '📚' },
-    { href: `${base}/document`, label: 'Living Document', icon: '📄' },
-    { href: `${base}/settings`, label: 'Settings', icon: '⚙️' },
+    { href: base, label: 'Notebook', icon: '📝', className: '' },
+    { href: `${base}/papers`, label: `Sources (${paperCount})`, icon: '📚', className: '' },
+    { href: `${base}/document`, label: 'Living Document', icon: '📄', className: '' },
+    // Only rendered once the right-hand assistant panel is hidden by CSS.
+    {
+      href: `${base}/assistant`,
+      label: 'Assistant',
+      icon: '💬',
+      className: 'nav-when-panel-hidden',
+    },
+    { href: `${base}/settings`, label: 'Settings', icon: '⚙️', className: '' },
   ];
 
   return (
@@ -94,7 +101,7 @@ export function Sidebar({
               <Link
                 key={view.href}
                 href={view.href}
-                className="btn btn-nav"
+                className={`btn btn-nav ${view.className}`.trim()}
                 aria-current={isActive ? 'page' : undefined}
               >
                 <span aria-hidden="true">{view.icon}</span>

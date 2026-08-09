@@ -476,6 +476,23 @@ async function verifyAuthenticatedPages(): Promise<void> {
   const papers = await get(`/p/${project.id}/papers`, ownerCookie);
   check('sources view renders 200', papers.status === 200);
 
+  // Assistant. This route is the only way to reach the assistant below 1200px,
+  // so it must render on its own rather than only inside the shell panel.
+  const assistant = await get(`/p/${project.id}/assistant`, ownerCookie);
+  const assistantHtml = await assistant.text();
+  check('assistant route renders 200', assistant.status === 200, `status ${assistant.status}`);
+  check(
+    'assistant route contains the chat composer',
+    assistantHtml.includes('Ask the research assistant'),
+  );
+
+  const stolenAssistant = await get(`/p/${project.id}/assistant`, intruderCookie);
+  check(
+    "another user cannot open someone else's assistant",
+    stolenAssistant.status === 404,
+    `status ${stolenAssistant.status}`,
+  );
+
   // Settings
   const settings = await get(`/p/${project.id}/settings`, ownerCookie);
   const settingsHtml = await settings.text();
@@ -530,6 +547,112 @@ async function verifyAuthenticatedPages(): Promise<void> {
   await prisma.user.deleteMany({ where: { id: { in: [owner.id, intruder.id] } } });
 }
 
+/**
+ * Regression checks for defects found after the initial build.
+ *
+ * Each corresponds to a specific bug; a failure here means it has returned.
+ */
+async function verifyRegressions(): Promise<void> {
+  const passwordHash = await hashPassword('irrelevant-value-here');
+  const user = await prisma.user.create({
+    data: { email: `regress-${Date.now()}@researchio.local`, name: 'Regress', passwordHash },
+  });
+
+  const project = await prisma.project.create({
+    data: { ownerId: user.id, name: 'Regression Project' },
+  });
+
+  // --- Chat history returned the OLDEST messages, so a long conversation
+  // --- froze on its opening exchanges.
+  const { listMessages } = await import('../src/server/services/chat.service');
+
+  for (let index = 0; index < 60; index += 1) {
+    await prisma.chatMessage.create({
+      data: {
+        projectId: project.id,
+        role: index % 2 === 0 ? 'user' : 'assistant',
+        content: `message-${index}`,
+        // Explicit timestamps: rows created in the same millisecond would
+        // otherwise have no deterministic order.
+        createdAt: new Date(Date.now() + index * 1000),
+      },
+    });
+  }
+
+  const recent = await listMessages(project.id, 50);
+  check('chat history returns the newest turns, not the oldest', recent.at(-1)?.content === 'message-59', recent.at(-1)?.content);
+  check('chat history is ordered oldest-first for reading', recent[0].content === 'message-10', recent[0].content);
+  check('chat history respects its limit', recent.length === 50, String(recent.length));
+
+  // --- getProject loaded every note on every render.
+  const { getProject, NOTE_PAGE_SIZE } = await import('../src/server/services/project.service');
+
+  for (let index = 0; index < NOTE_PAGE_SIZE + 10; index += 1) {
+    await prisma.note.create({
+      data: { projectId: project.id, content: `note-${index}` },
+    });
+  }
+
+  const firstPage = await getProject(project.id, user.id);
+  check('notes are paginated by default', firstPage.notes.length === NOTE_PAGE_SIZE, String(firstPage.notes.length));
+  check('the true note total is still reported', firstPage._count.notes === NOTE_PAGE_SIZE + 10, String(firstPage._count.notes));
+
+  const widened = await getProject(project.id, user.id, { noteLimit: NOTE_PAGE_SIZE + 25 });
+  check('requesting more notes returns more', widened.notes.length === NOTE_PAGE_SIZE + 10, String(widened.notes.length));
+
+  // --- The draft rate limiter was defined but never consumed.
+  const { RATE_LIMITS, consume } = await import('../src/server/security/rate-limit');
+
+  const key = `draft:regression-${Date.now()}`;
+  let allowed = 0;
+  for (let attempt = 0; attempt < RATE_LIMITS.draft.limit + 5; attempt += 1) {
+    if (consume(key, RATE_LIMITS.draft).ok) {
+      allowed += 1;
+    }
+  }
+  check('the draft limiter caps requests', allowed === RATE_LIMITS.draft.limit, String(allowed));
+
+  const draftSource = await import('node:fs/promises').then((fs) =>
+    fs.readFile('src/server/actions/document.actions.ts', 'utf8'),
+  );
+  check(
+    'the draft action actually consumes the limiter',
+    draftSource.includes('RATE_LIMITS.draft'),
+  );
+
+  // --- Session renewal updated the database but could not update the cookie,
+  // --- so "sliding" expiry silently did nothing.
+  const sessionSource = await import('node:fs/promises').then((fs) =>
+    fs.readFile('src/server/auth/session.ts', 'utf8'),
+  );
+  check(
+    'no unreachable session renewal remains',
+    !sessionSource.includes('extendIfStale'),
+  );
+
+  await prisma.user.delete({ where: { id: user.id } });
+}
+
+/** The assistant must remain reachable when the side panel is hidden. */
+async function verifyAssistantReachable(): Promise<void> {
+  const fs = await import('node:fs/promises');
+
+  const routeExists = await fs
+    .access('src/app/p/[projectId]/assistant/page.tsx')
+    .then(() => true)
+    .catch(() => false);
+  check('a dedicated assistant route exists', routeExists);
+
+  const sidebar = await fs.readFile('src/components/workspace/Sidebar.tsx', 'utf8');
+  check('the sidebar links to the assistant', sidebar.includes('/assistant'));
+
+  const css = await fs.readFile('src/app/globals.css', 'utf8');
+  check(
+    'the assistant nav appears exactly when the panel is hidden',
+    css.includes('.nav-when-panel-hidden'),
+  );
+}
+
 // ---------------------------------------------------------------------------
 
 async function main(): Promise<void> {
@@ -541,6 +664,8 @@ async function main(): Promise<void> {
   await section('Completion checklist', verifyChecklist);
   await section('Document text extraction', verifyPdfExtraction);
   await section('Database integration', verifyDatabase);
+  await section('Regressions', verifyRegressions);
+  await section('Assistant reachability', verifyAssistantReachable);
   await section(`HTTP surface (${BASE_URL})`, verifyHttp);
   await section('Authenticated workspace', verifyAuthenticatedPages);
 

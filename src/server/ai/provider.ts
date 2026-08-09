@@ -36,6 +36,20 @@ const BASE_BACKOFF_MS = 500;
 /** Embedding requests are batched; the API rejects oversized batches. */
 const EMBED_BATCH_SIZE = 64;
 
+/**
+ * Dimensions requested per embedding.
+ *
+ * `gemini-embedding-001` returns 3072 by default. Truncating to 768 cuts stored
+ * size and scan cost fourfold — retrieval here compares a few thousand chunks
+ * within one project, where the extra dimensions buy no measurable accuracy.
+ *
+ * Reduced-dimension output is not unit-length, so it must be normalized before
+ * use; `encodeEmbedding` does that for stored vectors and `retrieve` for the
+ * query. Changing this value invalidates existing embeddings, since vectors of
+ * differing length score zero against each other.
+ */
+const EMBED_DIMENSIONS = 768;
+
 let client: GoogleGenAI | null = null;
 
 function getClient(): GoogleGenAI {
@@ -276,6 +290,7 @@ export async function embedTexts(texts: readonly string[]): Promise<number[][]> 
       getClient().models.embedContent({
         model: env.ai.embeddingModel,
         contents: [...batch],
+        config: { outputDimensionality: EMBED_DIMENSIONS },
       }),
     );
 

@@ -28,8 +28,20 @@ const schema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
 
   GEMINI_API_KEY: z.string().optional().transform((v) => v?.trim() || ''),
-  GEMINI_TEXT_MODEL: z.string().min(1).default('gemini-2.5-flash'),
-  GEMINI_EMBEDDING_MODEL: z.string().min(1).default('text-embedding-004'),
+  // Both defaults are deliberate.
+  //
+  // Version-pinned names get retired, and some remain listed by the API while
+  // being closed to new accounts — `gemini-2.5-flash` returns "no longer
+  // available to new users" despite appearing in ListModels. The `-latest`
+  // alias tracks the current model and does not rot.
+  //
+  // `text-embedding-004` was retired outright and 404s on embedContent.
+  //
+  // A dead name fails only when called, so uploads appear to succeed while
+  // every document is left unindexed. Run `npm run ai:check` after changing
+  // either value.
+  GEMINI_TEXT_MODEL: z.string().min(1).default('gemini-flash-latest'),
+  GEMINI_EMBEDDING_MODEL: z.string().min(1).default('gemini-embedding-001'),
 
   UPLOAD_DIR: z.string().min(1).default('storage/uploads'),
   MAX_UPLOAD_MB: z.coerce.number().int().positive().max(200).default(25),

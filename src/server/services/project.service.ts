@@ -74,8 +74,27 @@ export async function listProjects(userId: string) {
   });
 }
 
-/** Full project detail for the workspace views. */
-export async function getProject(projectId: string, userId: string) {
+/** Notes returned per page. */
+export const NOTE_PAGE_SIZE = 50;
+
+/**
+ * Full project detail for the workspace views.
+ *
+ * Notes are paginated and papers are capped. Loading every row was fine at
+ * demo scale but degrades badly for a real project: an active researcher
+ * accumulates hundreds of notes, and each one was being queried, serialised
+ * into the RSC payload and rendered on every page view of all three tabs.
+ *
+ * `noteLimit` grows on request from the UI rather than exposing offsets, since
+ * notes are only ever read newest-first.
+ */
+export async function getProject(
+  projectId: string,
+  userId: string,
+  options: { noteLimit?: number } = {},
+) {
+  const noteLimit = options.noteLimit ?? NOTE_PAGE_SIZE;
+
   const project = await prisma.project.findUnique({
     where: { id: projectId },
     include: {
@@ -94,8 +113,9 @@ export async function getProject(projectId: string, userId: string) {
           },
         },
       },
-      notes: { orderBy: { createdAt: 'desc' } },
-      papers: { orderBy: { createdAt: 'desc' } },
+      notes: { orderBy: { createdAt: 'desc' }, take: noteLimit },
+      papers: { orderBy: { createdAt: 'desc' }, take: 200 },
+      _count: { select: { notes: true, papers: true } },
     },
   });
 

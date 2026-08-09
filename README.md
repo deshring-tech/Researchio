@@ -31,7 +31,15 @@ For drafting, semantic search and the research assistant, add a [Google AI Studi
 GEMINI_API_KEY="your-key"
 ```
 
-Restart the server. Notes and documents saved beforehand are indexed automatically the next time you open the project — no migration needed.
+Restart the server, then confirm the provider is reachable:
+
+```bash
+npm run ai:check
+```
+
+Notes and documents saved beforehand are indexed automatically the next time you open the project — no migration needed.
+
+> **Model names rot.** Google retires them, and some stay listed by the API while being closed to new accounts — `gemini-2.5-flash` and `text-embedding-004` both fail this way. A dead name errors only when called, so uploads appear to succeed while every document is silently left unindexed. `npm run ai:check` catches it in seconds; run it whenever you change a model.
 
 Without a key the app says so plainly in a banner and disables the affected controls. It never generates placeholder text and presents it as a result.
 
@@ -85,7 +93,8 @@ Two rules keep this honest:
 | `npm run dev` | Development server |
 | `npm run build` / `npm start` | Production build and serve |
 | `npm run verify` | Typecheck, lint, and production build |
-| `npm run verify:e2e` | 63 assertions against the real stack (dev server must be running) |
+| `npm run verify:e2e` | 78 assertions against the real stack (dev server must be running) |
+| `npm run ai:check` | Live provider check — confirms the configured models still exist |
 | `npm run db:migrate` | Create and apply a migration after editing the schema |
 | `npm run db:studio` | Browse the database |
 | `npm run db:seed` | Re-seed the demo account |
@@ -129,13 +138,14 @@ Stated plainly, because a tool that overstates itself is worse than one that doe
 - **Rate limiting is per-process.** Correct for one node; a shared store is required behind a load balancer.
 - **Scanned PDFs are rejected, not OCR'd.** Image-only PDFs yield no text and are reported as such rather than silently indexed as empty.
 - **Uploads accept PDF, plain text and Markdown only.** These are the formats the pipeline can genuinely read.
-- **AI paths need a live key to exercise.** `verify:e2e` covers everything else; drafting, embedding and chat require a configured provider.
+- **Sessions expire 30 days after sign-in and do not slide.** Renewal needs a cookie write, which is not permitted during render; see the note in `src/server/auth/session.ts`.
+- **Papers are capped at 200 per project in the list view.** Notes paginate properly; papers do not yet.
 
 ---
 
 ## Verification
 
-`scripts/verify.ts` runs 63 assertions against the real database and a live server, including:
+`scripts/verify.ts` runs 78 assertions against the real database and a live server, including:
 
 - PDF text extraction, from a PDF generated in-memory during the run
 - Embedding round-trips through the database, including the unaligned-buffer case
@@ -148,3 +158,7 @@ Stated plainly, because a tool that overstates itself is worse than one that doe
 npm run dev            # in one terminal
 npm run verify:e2e     # in another
 ```
+
+It also carries regression checks for defects found after the first build — chat history returning the oldest turns, unpaginated note loading, an unwired rate limiter, and unreachable session renewal. A failure there means one has come back.
+
+The live AI path is covered separately by `npm run ai:check`, which needs a key and is deliberately kept out of CI.

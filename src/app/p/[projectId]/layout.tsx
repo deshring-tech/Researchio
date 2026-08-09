@@ -1,6 +1,7 @@
 import { notFound, redirect } from 'next/navigation';
 
 import { Sidebar } from '@/components/workspace/Sidebar';
+import { AssistantPanel } from '@/components/workspace/AssistantPanel';
 import { ResearchAssistant } from '@/components/workspace/ResearchAssistant';
 import { getCurrentUser } from '@/server/auth/session';
 import { assertProjectAccess, listProjects } from '@/server/services/project.service';
@@ -74,28 +75,9 @@ export default async function ProjectLayout({
         {children}
       </main>
 
-      <aside className="right-panel">
-        <div
-          style={{
-            padding: 'var(--spacing-4)',
-            fontWeight: 600,
-            borderBottom: '1px solid var(--border-color)',
-          }}
-        >
-          Research Assistant
-        </div>
-        <div
-          style={{
-            flex: 1,
-            padding: 'var(--spacing-4)',
-            display: 'flex',
-            flexDirection: 'column',
-            overflow: 'hidden',
-          }}
-        >
-          <ResearchAssistant projectId={projectId} aiEnabled={aiEnabled()} />
-        </div>
-      </aside>
+      <AssistantPanel>
+        <ResearchAssistant projectId={projectId} aiEnabled={aiEnabled()} />
+      </AssistantPanel>
     </div>
   );
 }

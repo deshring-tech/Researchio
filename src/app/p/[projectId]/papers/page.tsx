@@ -14,11 +14,20 @@ export default async function PapersPage({
   const user = await requireUser();
   await assertProjectAccess(projectId, user.id);
 
-  const papers = await prisma.paper.findMany({
-    where: { projectId },
-    orderBy: { createdAt: 'desc' },
-    include: { _count: { select: { chunks: true } } },
-  });
+  // Capped rather than paginated: a project with more than 200 uploaded sources
+  // is well outside the range this UI is designed for, and an unbounded query
+  // here would load every extracted document's metadata on each page view.
+  const PAPER_LIMIT = 200;
+
+  const [papers, totalPapers] = await Promise.all([
+    prisma.paper.findMany({
+      where: { projectId },
+      orderBy: { createdAt: 'desc' },
+      take: PAPER_LIMIT,
+      include: { _count: { select: { chunks: true } } },
+    }),
+    prisma.paper.count({ where: { projectId } }),
+  ]);
 
   return (
     <>
@@ -26,9 +35,11 @@ export default async function PapersPage({
         <div>
           <h1 className="h1">Sources</h1>
           <p className="muted text-sm" style={{ margin: 0 }}>
-            {papers.length === 0
+            {totalPapers === 0
               ? 'Nothing uploaded yet'
-              : `${papers.length} document${papers.length > 1 ? 's' : ''}`}
+              : `${totalPapers} document${totalPapers > 1 ? 's' : ''}${
+                  totalPapers > papers.length ? ` · showing the newest ${papers.length}` : ''
+                }`}
           </p>
         </div>
       </header>

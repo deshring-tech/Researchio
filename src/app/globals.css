@@ -176,6 +176,21 @@ a:hover {
   }
 }
 
+/*
+ * The assistant's sidebar link. Redundant while the right-hand panel is
+ * visible, so it only appears once that panel is hidden — at which point the
+ * dedicated /assistant route is the only way to reach the feature.
+ */
+.nav-when-panel-hidden {
+  display: none;
+}
+
+@media (max-width: 1200px) {
+  .nav-when-panel-hidden {
+    display: inline-flex;
+  }
+}
+
 @media (max-width: 900px) {
   .app-container {
     flex-direction: column;
