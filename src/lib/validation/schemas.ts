@@ -76,6 +76,37 @@ export const loginSchema = z.object({
 });
 
 // ---------------------------------------------------------------------------
+// Account
+// ---------------------------------------------------------------------------
+
+export const changePasswordSchema = z
+  .object({
+    currentPassword: z.string().min(1, 'Enter your current password.'),
+    newPassword: passwordField,
+    confirmPassword: z.string(),
+  })
+  .refine((data) => data.newPassword === data.confirmPassword, {
+    message: 'Passwords do not match.',
+    path: ['confirmPassword'],
+  })
+  .refine((data) => data.newPassword !== data.currentPassword, {
+    message: 'Choose a password different from your current one.',
+    path: ['newPassword'],
+  });
+
+export const changeProfileSchema = z.object({
+  name: requiredText('Name', LIMITS.nameMax),
+  email: emailField,
+});
+
+export const deleteAccountSchema = z.object({
+  // Re-authentication: deletion destroys every project permanently, so an
+  // unattended session must not be enough to trigger it.
+  password: z.string().min(1, 'Enter your password to confirm.'),
+  confirmation: z.string(),
+});
+
+// ---------------------------------------------------------------------------
 // Projects
 // ---------------------------------------------------------------------------
 

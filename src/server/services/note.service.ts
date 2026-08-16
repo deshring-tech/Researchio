@@ -5,6 +5,7 @@ import { assertProjectAccess, touchProject } from '@/server/services/project.ser
 import { deleteChunksFor, indexNote } from '@/server/services/indexing.service';
 import { recordEvent } from '@/server/services/timeline.service';
 import { aiEnabled } from '@/server/ai/provider';
+import { logger } from '@/server/observability/logger';
 import { notFound } from '@/lib/errors';
 
 /**
@@ -48,7 +49,10 @@ export async function createNote(
         content: input.content,
       });
     } catch (error) {
-      console.error('[note.createNote] indexing failed; note saved unindexed', note.id, error);
+      logger.warn('Note saved but not indexed; retried when the project is next opened', {
+        noteId: note.id,
+        error,
+      });
     }
   }
 
@@ -104,7 +108,7 @@ export async function reindexPendingNotes(projectId: string, limit = 25): Promis
       await indexNote({ noteId: note.id, projectId, content: note.content });
       indexed += 1;
     } catch (error) {
-      console.error('[note.reindexPendingNotes] failed for note', note.id, error);
+      logger.warn('Backfill indexing failed; stopping this pass', { noteId: note.id, error });
       // Stop on first failure: if the provider is down, the rest will fail too.
       break;
     }

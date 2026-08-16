@@ -3,6 +3,7 @@ import { aiEnabled, streamText } from '@/server/ai/provider';
 import { ACADEMIC_SYSTEM_INSTRUCTION } from '@/server/ai/prompts';
 import { persistTurn, prepareTurn } from '@/server/services/chat.service';
 import { RATE_LIMITS, consume } from '@/server/security/rate-limit';
+import { logger } from '@/server/observability/logger';
 import { chatRequestSchema, parseInput } from '@/lib/validation/schemas';
 import { AppError } from '@/lib/errors';
 
@@ -41,7 +42,7 @@ function errorResponse(error: unknown) {
       : new AppError('INTERNAL', 'Could not answer that question.');
 
   if (!appError.expected) {
-    console.error('[api/chat]', error);
+    logger.error('Chat request failed', error);
   }
 
   return Response.json(
@@ -117,7 +118,7 @@ export async function POST(request: Request): Promise<Response> {
             : 'The answer was interrupted. Please try again.';
 
         if (!(error instanceof AppError && error.expected)) {
-          console.error('[api/chat] stream failure', error);
+          logger.error('Chat stream failed mid-response', error, { projectId });
         }
 
         controller.enqueue(sse({ type: 'error', message }));

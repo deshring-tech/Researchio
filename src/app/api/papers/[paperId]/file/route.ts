@@ -1,6 +1,7 @@
 import { requireUser } from '@/server/auth/session';
 import { getPaperForDownload } from '@/server/services/paper.service';
 import { readUpload } from '@/server/storage/files';
+import { logger } from '@/server/observability/logger';
 import { AppError } from '@/lib/errors';
 
 /**
@@ -44,7 +45,7 @@ export async function GET(
       error instanceof AppError ? error : new AppError('INTERNAL', 'Could not load the file.');
 
     if (!appError.expected) {
-      console.error('[api/papers/file]', error);
+      logger.error('Serving an uploaded file failed', error);
     }
 
     return Response.json({ error: appError.message }, { status: appError.status });

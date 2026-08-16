@@ -1,6 +1,18 @@
 import Link from 'next/link';
+import { connection } from 'next/server';
 
-export default function NotFound() {
+/**
+ * Not-found page.
+ *
+ * `connection()` forces dynamic rendering. Nonces are injected during
+ * server-side rendering from the request's CSP header, so a statically
+ * generated page would ship framework scripts with no nonce — the browser
+ * would then block them under our strict `script-src` and this page would
+ * never hydrate.
+ */
+export default async function NotFound() {
+  await connection();
+
   return (
     <main className="centered-page">
       <div className="centered-card">

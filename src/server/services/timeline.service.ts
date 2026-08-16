@@ -3,6 +3,7 @@ import 'server-only';
 import type { Prisma } from '@prisma/client';
 
 import { prisma } from '@/server/db/prisma';
+import { logger } from '@/server/observability/logger';
 import type { TimelineEventType } from '@/lib/domain/constants';
 
 /**
@@ -42,7 +43,11 @@ export async function recordEvent(input: RecordEventInput): Promise<void> {
   try {
     await recordEventWith(prisma, input);
   } catch (error) {
-    console.error('[timeline.recordEvent] failed to record activity', error);
+    logger.warn('Failed to record timeline event', {
+      projectId: input.projectId,
+      type: input.type,
+      error,
+    });
   }
 }
 

@@ -5,6 +5,7 @@ import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { env } from '@/server/config/env';
+import { logger } from '@/server/observability/logger';
 import { ACCEPTED_UPLOAD_TYPES } from '@/lib/domain/constants';
 import { AppError } from '@/lib/errors';
 
@@ -116,7 +117,7 @@ export async function deleteUpload(storageKey: string): Promise<void> {
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code !== 'ENOENT') {
-      console.error('[storage.deleteUpload] failed to remove file', storageKey, error);
+      logger.warn('Failed to remove stored file', { storageKey, error });
     }
   }
 }

@@ -92,8 +92,9 @@ Two rules keep this honest:
 |---|---|
 | `npm run dev` | Development server |
 | `npm run build` / `npm start` | Production build and serve |
-| `npm run verify` | Typecheck, lint, and production build |
-| `npm run verify:e2e` | 78 assertions against the real stack (dev server must be running) |
+| `npm run test` | 74 unit tests over the pure modules |
+| `npm run verify` | Typecheck, lint, unit tests, production build |
+| `npm run verify:e2e` | 103 assertions against the real stack (server must be running) |
 | `npm run ai:check` | Live provider check — confirms the configured models still exist |
 | `npm run db:migrate` | Create and apply a migration after editing the schema |
 | `npm run db:studio` | Browse the database |
@@ -103,29 +104,57 @@ Two rules keep this honest:
 
 ## Deployment
 
-The app is a standard Node server and runs anywhere Node does — a VPS, Fly, Railway, Render, or a container.
+Designed for a single node with a persistent volume — a VPS or any container host.
 
 ```bash
-npm ci
-npm run build
+cp .env.example .env      # set GEMINI_API_KEY
+docker compose up -d --build
+```
+
+That is the whole deployment. The image runs migrations on boot, serves on port 3000, and reports readiness at `/api/health`.
+
+### The volume is the only thing that matters
+
+All durable state lives in the `researchio-data` volume, mounted at `/data`:
+
+- `/data/researchio.db` — the database
+- `/data/uploads` — every uploaded source document
+
+**Anything written outside that volume is lost on the next deploy.** `DATABASE_URL` and `UPLOAD_DIR` are set in the Dockerfile and deliberately not overridable from compose, so they cannot be pointed at container-local disk by accident.
+
+Back up the volume, not the container:
+
+```bash
+docker compose exec app sh -c 'tar czf - /data' > researchio-backup.tar.gz
+```
+
+### Without Docker
+
+```bash
+npm ci && npm run build
 npx prisma migrate deploy
 NODE_ENV=production npm start
 ```
-
-Set in the environment:
 
 | Variable | Notes |
 |---|---|
 | `DATABASE_URL` | Relative `file:` paths resolve against `prisma/`, matching the Prisma CLI |
 | `GEMINI_API_KEY` | Omit to run with AI disabled |
-| `UPLOAD_DIR` | **Must be a persistent volume.** Uploaded sources live here, not in the database |
+| `UPLOAD_DIR` | **Must be on durable storage.** Uploads live here, not in the database |
 | `SECURE_COOKIES` | `1` in production. Implied when `NODE_ENV=production` |
+| `LOG_LEVEL` | `debug` / `info` / `warn` / `error`. Defaults to `info` in production |
 
-### Two things to get right
+Put TLS in front of it — a reverse proxy (Caddy, nginx, Traefik) terminating HTTPS. Session cookies are `Secure` in production and will not be sent over plain HTTP.
 
-**Persistent storage.** SQLite and `UPLOAD_DIR` are both on disk. On a platform with an ephemeral filesystem (Vercel, and most default container setups) every deploy discards user data. Mount a volume, or move to PostgreSQL and object storage.
+### Operations
 
-**Switching to PostgreSQL.** Change `provider` in `prisma/schema.prisma` to `postgresql`, set a `postgres://` URL, delete `prisma/migrations` and run `npm run db:migrate`. No application code changes — the schema uses no SQLite-specific types.
+- **Health:** `GET /api/health` returns 200 only when the database and upload directory are both reachable. It is what the container healthcheck and any load balancer should poll.
+- **Logs:** JSON, one object per line, in production. Credential-shaped fields are redacted before serialization.
+- **Shutdown:** SIGTERM closes the database cleanly before exit, so a deploy cannot tear down SQLite mid-write. Compose allows 30 seconds.
+
+### Switching to PostgreSQL
+
+Change `provider` in `prisma/schema.prisma` to `postgresql`, set a `postgres://` URL, delete `prisma/migrations`, and run `npm run db:migrate`. No application code changes — the schema uses no SQLite-specific types. Uploads would still need object storage; `src/server/storage/files.ts` is the only module that touches the filesystem.
 
 ---
 
@@ -140,19 +169,27 @@ Stated plainly, because a tool that overstates itself is worse than one that doe
 - **Uploads accept PDF, plain text and Markdown only.** These are the formats the pipeline can genuinely read.
 - **Sessions expire 30 days after sign-in and do not slide.** Renewal needs a cookie write, which is not permitted during render; see the note in `src/server/auth/session.ts`.
 - **Papers are capped at 200 per project in the list view.** Notes paginate properly; papers do not yet.
+- **No password reset.** There is no email delivery, so a forgotten password cannot be recovered — only changed while signed in. Adding it means introducing an email provider.
+- **`style-src` permits `unsafe-inline`.** The UI uses React inline styles throughout and `next/font` injects an inline style element. `script-src` — the directive that actually stops injected code — remains strict and nonce-only.
 
 ---
 
 ## Verification
 
-`scripts/verify.ts` runs 78 assertions against the real database and a live server, including:
+Two layers, deliberately.
+
+`npm run test` — 74 Vitest unit tests over the pure modules: chunking, vector maths, checklist rules, password hashing, validation, datasource resolution. Fast, no I/O.
+
+`npm run verify:e2e` — 103 assertions against the real database and a live server:
 
 - PDF text extraction, from a PDF generated in-memory during the run
 - Embedding round-trips through the database, including the unaligned-buffer case
-- scrypt hashing, rejection of malformed hashes, salt uniqueness
 - Cascade deletes for chunks and notes
 - **Cross-account isolation** — a second user requesting another's project gets `404`, and cannot export it
+- Account deletion purging projects, notes, chunks and sessions
 - Expired sessions rejected, path traversal blocked, security headers present
+- CSP carrying a fresh per-request nonce, with no `unsafe-inline` in `script-src`
+- Health endpoint proving real database and filesystem reachability
 
 ```bash
 npm run dev            # in one terminal

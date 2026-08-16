@@ -136,6 +136,29 @@ export async function destroySession(): Promise<void> {
   store.delete(COOKIE_NAME);
 }
 
+/**
+ * Revokes every session for a user except the one making the request.
+ *
+ * Called after a password change: if the old password had leaked, an attacker
+ * holding a live session would otherwise keep their access indefinitely, since
+ * sessions carry no reference to the password that created them.
+ *
+ * @returns Number of sessions revoked.
+ */
+export async function revokeOtherSessions(userId: string): Promise<number> {
+  const store = await cookies();
+  const token = store.get(COOKIE_NAME)?.value;
+
+  const result = await prisma.session.deleteMany({
+    where: {
+      userId,
+      ...(token ? { tokenHash: { not: hashToken(token) } } : {}),
+    },
+  });
+
+  return result.count;
+}
+
 /** Removes expired sessions. Invoked opportunistically on sign-in. */
 export async function pruneExpiredSessions(): Promise<void> {
   await prisma.session

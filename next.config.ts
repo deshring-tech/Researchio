@@ -24,6 +24,13 @@ const nextConfig: NextConfig = {
   typescript: { ignoreBuildErrors: false },
 
   /**
+   * Emits a self-contained server bundle with only the dependencies actually
+   * reached at runtime. This is what keeps the Docker image small and lets the
+   * final stage ship without node_modules or the build toolchain.
+   */
+  output: 'standalone',
+
+  /**
    * pdf-parse loads pdfjs-dist, which uses dynamic requires and ships its own
    * worker. Bundling it breaks those lookups, so it is kept external and
    * resolved from node_modules at runtime.

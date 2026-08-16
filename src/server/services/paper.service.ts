@@ -10,6 +10,7 @@ import { deleteUpload, readUpload, saveUpload } from '@/server/storage/files';
 import { deleteChunksFor, indexPaper } from '@/server/services/indexing.service';
 import { assertProjectAccess, touchProject } from '@/server/services/project.service';
 import { recordEvent } from '@/server/services/timeline.service';
+import { logger } from '@/server/observability/logger';
 import { AppError, notFound } from '@/lib/errors';
 import type { IngestionStatus } from '@/lib/domain/constants';
 
@@ -187,7 +188,7 @@ export async function ingestPaper(paperId: string): Promise<void> {
         : 'Processing failed unexpectedly. Try again, or re-upload the file.';
 
     if (!(error instanceof AppError && error.expected)) {
-      console.error('[paper.ingestPaper] unexpected failure', paperId, error);
+      logger.error('Ingestion failed unexpectedly', error, { paperId });
     }
 
     await setStatus(paperId, 'failed', message).catch(() => undefined);
@@ -229,7 +230,7 @@ async function analysePaper(paperId: string, filename: string, text: string): Pr
       },
     });
   } catch (error) {
-    console.error('[paper.analysePaper] analysis failed; paper remains searchable', paperId, error);
+    logger.warn('Analysis failed; the paper remains searchable', { paperId, error });
   }
 }
 

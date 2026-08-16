@@ -8,6 +8,7 @@ import {
   uploadPaper,
 } from '@/server/services/paper.service';
 import { revalidateProject, run } from '@/server/actions/runner';
+import { logger } from '@/server/observability/logger';
 import { paperIdSchema, parseFormData, parseInput, projectIdSchema } from '@/lib/validation/schemas';
 import { AppError, type ActionResult } from '@/lib/errors';
 
@@ -59,7 +60,7 @@ export async function uploadPapersAction(
             : 'Could not be stored.';
 
         if (!(error instanceof AppError && error.expected)) {
-          console.error('[paper.upload] unexpected failure for', file.name, error);
+          logger.error('Upload failed unexpectedly', error, { filename: file.name });
         }
 
         outcome.failures.push({ name: file.name, reason });

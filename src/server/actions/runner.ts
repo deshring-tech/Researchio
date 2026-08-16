@@ -2,7 +2,8 @@ import 'server-only';
 
 import { revalidatePath } from 'next/cache';
 
-import { type ActionResult, success, toActionFailure } from '@/lib/errors';
+import { logger } from '@/server/observability/logger';
+import { type ActionResult, isExpected, success, toActionFailure } from '@/lib/errors';
 
 /**
  * MODULE: server/actions/runner
@@ -34,7 +35,13 @@ export async function run<T>(
   try {
     return success(await body());
   } catch (error) {
-    return toActionFailure(error, context);
+    // Expected failures are the user's problem to fix and are already carried
+    // back in the result. Anything else is ours, and must be recorded in full.
+    if (!isExpected(error)) {
+      logger.error('Server action failed', error, { action: context });
+    }
+
+    return toActionFailure(error);
   }
 }
 

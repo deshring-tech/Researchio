@@ -1,5 +1,6 @@
 import { requireUser } from '@/server/auth/session';
 import { getProject } from '@/server/services/project.service';
+import { logger } from '@/server/observability/logger';
 import { AppError } from '@/lib/errors';
 import { formatDate } from '@/lib/format';
 
@@ -81,7 +82,7 @@ export async function GET(
       error instanceof AppError ? error : new AppError('INTERNAL', 'Could not export.');
 
     if (!appError.expected) {
-      console.error('[api/projects/export]', error);
+      logger.error('Document export failed', error);
     }
 
     return Response.json({ error: appError.message }, { status: appError.status });

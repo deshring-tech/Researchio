@@ -123,11 +123,16 @@ export function Sidebar({
         <span className="text-xs muted" title={userName}>
           Signed in as {userName}
         </span>
-        <form action={logoutAction}>
-          <button type="submit" className="btn btn-ghost btn-sm" style={{ paddingLeft: 0 }}>
-            Sign out
-          </button>
-        </form>
+        <div className="row" style={{ gap: 'var(--spacing-3)' }}>
+          <Link href="/account" className="text-sm">
+            Account
+          </Link>
+          <form action={logoutAction}>
+            <button type="submit" className="btn btn-ghost btn-sm" style={{ padding: 0 }}>
+              Sign out
+            </button>
+          </form>
+        </div>
       </div>
     </aside>
   );

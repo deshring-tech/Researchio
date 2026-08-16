@@ -38,6 +38,9 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      - name: Unit tests
+        run: npm run test
+
       - name: Build
         run: npm run build
 
@@ -57,3 +60,61 @@ jobs:
       - name: Stop server
         if: always()
         run: kill "$SERVER_PID" 2>/dev/null || true
+
+  # Proves the production image builds and that a container actually becomes
+  # healthy — a Dockerfile that only compiles is not evidence of a deployable
+  # artifact.
+  docker:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t researchio:ci .
+
+      - name: Start container
+        run: |
+          docker run -d --name researchio-ci -p 3000:3000 \
+            -v researchio-ci-data:/data \
+            researchio:ci
+
+      - name: Wait for health
+        run: |
+          for attempt in $(seq 1 30); do
+            status=$(docker inspect --format '{{.State.Health.Status}}' researchio-ci 2>/dev/null || echo starting)
+            if [ "$status" = "healthy" ]; then
+              echo "container healthy after ${attempt} checks"
+              exit 0
+            fi
+            if [ "$status" = "unhealthy" ]; then
+              echo "container reported unhealthy"
+              docker logs researchio-ci
+              exit 1
+            fi
+            sleep 5
+          done
+          echo "timed out waiting for health"
+          docker logs researchio-ci
+          exit 1
+
+      - name: Verify the health endpoint reports ok
+        run: |
+          body=$(curl -fsS http://localhost:3000/api/health)
+          echo "$body"
+          echo "$body" | grep -q '"status":"ok"'
+
+      - name: Confirm data survives a container replacement
+        run: |
+          # The volume is the only durable state; recreating the container must
+          # not lose the database.
+          docker exec researchio-ci sh -c 'ls -l /data/researchio.db'
+          docker rm -f researchio-ci
+          docker run -d --name researchio-ci2 -p 3001:3000 \
+            -v researchio-ci-data:/data researchio:ci
+          sleep 20
+          docker exec researchio-ci2 sh -c 'ls -l /data/researchio.db'
+
+      - name: Container logs
+        if: always()
+        run: docker logs researchio-ci2 2>&1 | tail -50 || true

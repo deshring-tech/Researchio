@@ -4,7 +4,7 @@ import { randomBytes } from 'node:crypto';
 
 import { prisma } from '@/server/db/prisma';
 import { hashPassword, verifyPassword } from '@/server/auth/password';
-import { AppError } from '@/lib/errors';
+import { AppError, notFound } from '@/lib/errors';
 
 /**
  * MODULE: server/services/auth
@@ -63,6 +63,101 @@ export async function register(input: Credentials & { name: string }) {
     data: { name: input.name, email: input.email, passwordHash },
     select: { id: true, email: true, name: true },
   });
+}
+
+/**
+ * Changes a password after verifying the current one.
+ *
+ * @returns Nothing. The caller is responsible for revoking other sessions —
+ *   see `revokeOtherSessions`, which needs the current session's identity.
+ * @throws AppError UNAUTHORIZED when the current password is wrong.
+ */
+export async function changePassword(
+  userId: string,
+  input: { currentPassword: string; newPassword: string },
+): Promise<void> {
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { passwordHash: true },
+  });
+
+  if (!user) {
+    throw notFound('Account');
+  }
+
+  const matches = await verifyPassword(input.currentPassword, user.passwordHash);
+  if (!matches) {
+    throw new AppError('UNAUTHORIZED', 'That is not your current password.', {
+      fieldErrors: { currentPassword: 'That is not your current password.' },
+    });
+  }
+
+  await prisma.user.update({
+    where: { id: userId },
+    data: { passwordHash: await hashPassword(input.newPassword) },
+  });
+}
+
+export async function updateProfile(
+  userId: string,
+  input: { name: string; email: string },
+) {
+  const existing = await prisma.user.findUnique({
+    where: { email: input.email },
+    select: { id: true },
+  });
+
+  if (existing && existing.id !== userId) {
+    throw new AppError('CONFLICT', 'That email is already in use.', {
+      fieldErrors: { email: 'That email is already in use.' },
+    });
+  }
+
+  return prisma.user.update({
+    where: { id: userId },
+    data: { name: input.name, email: input.email },
+    select: { id: true, email: true, name: true },
+  });
+}
+
+/**
+ * Verifies a password without issuing a session.
+ *
+ * Used to re-authenticate before destructive actions such as account deletion.
+ */
+export async function verifyCurrentPassword(
+  userId: string,
+  password: string,
+): Promise<boolean> {
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { passwordHash: true },
+  });
+
+  return user ? verifyPassword(password, user.passwordHash) : false;
+}
+
+/**
+ * Permanently deletes an account and everything belonging to it.
+ *
+ * Projects, documents, notes, papers, chunks, citations and sessions all
+ * cascade from `User`. Uploaded files live on disk rather than in the
+ * database, so their storage keys are returned for the caller to remove — the
+ * service deliberately performs no file I/O.
+ *
+ * @returns Storage keys of every file that must now be deleted from disk.
+ */
+export async function deleteAccount(userId: string): Promise<string[]> {
+  const papers = await prisma.paper.findMany({
+    where: { project: { ownerId: userId }, storageKey: { not: null } },
+    select: { storageKey: true },
+  });
+
+  await prisma.user.delete({ where: { id: userId } });
+
+  return papers
+    .map((paper) => paper.storageKey)
+    .filter((key): key is string => key !== null);
 }
 
 export async function authenticate(input: Credentials) {

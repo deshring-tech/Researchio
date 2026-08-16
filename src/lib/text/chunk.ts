@@ -136,7 +136,15 @@ export function chunkText(input: string, options: ChunkOptions = {}): string[] {
       continue;
     }
 
-    const overlap = tailOverlap(current, overlapChars);
+    // Clamp the carried overlap to whatever room the incoming fragment leaves.
+    // Without this, a full-size fragment plus a full-size overlap produces a
+    // chunk larger than `maxChars` — at the defaults, 1380 characters against a
+    // 1200 limit. Oversized passages risk silent truncation by the embedding
+    // API, which would drop the tail of the passage from the index while
+    // appearing to succeed.
+    const room = maxChars - fragment.length - 1;
+    const overlap = room > 0 ? tailOverlap(current, Math.min(overlapChars, room)) : '';
+
     flush();
     current = overlap.length > 0 ? `${overlap} ${fragment}` : fragment;
   }

@@ -1,0 +1,40 @@
+# Rebuilt inside the image.
+node_modules
+.next
+out
+build
+
+# Never ship secrets or local state into an image layer.
+.env
+.env.*
+!.env.example
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+storage
+
+# Development-only.
+.git
+.github
+.claude
+.vscode
+.idea
+scripts
+*.log
+npm-debug.log*
+
+# Documentation and tooling that the runtime does not read.
+README.md
+AGENTS.md
+CLAUDE.md
+start.bat
+docker-compose.yml
+Dockerfile
+.dockerignore
+.gitignore
+.gitattributes
+
+# Test output.
+coverage
+*.tsbuildinfo

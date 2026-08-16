@@ -105,19 +105,29 @@ export function failure(
   return { ok: false, code, message, fieldErrors };
 }
 
-const GENERIC_MESSAGE = 'Something went wrong. Please try again.';
+export const GENERIC_ERROR_MESSAGE = 'Something went wrong. Please try again.';
+
+/**
+ * True when an error is safe to show the user verbatim.
+ *
+ * Anything else must be reported generically, since its message may carry
+ * database or provider internals.
+ */
+export function isExpected(error: unknown): error is AppError {
+  return error instanceof AppError && error.expected;
+}
 
 /**
  * Converts any thrown value into a client-safe failure.
  *
- * Expected errors keep their message. Unexpected ones are logged server-side
- * and replaced with a generic message so internals never leak to the browser.
+ * Deliberately does no logging: this module is imported by Client Components,
+ * so it cannot depend on the server-only logger. Callers on the server log
+ * unexpected errors themselves — see `server/actions/runner`.
  */
-export function toActionFailure(error: unknown, context: string): ActionFailure {
-  if (error instanceof AppError && error.expected) {
+export function toActionFailure(error: unknown): ActionFailure {
+  if (isExpected(error)) {
     return failure(error.code, error.message, error.fieldErrors);
   }
 
-  console.error(`[${context}]`, error);
-  return failure('INTERNAL', GENERIC_MESSAGE);
+  return failure('INTERNAL', GENERIC_ERROR_MESSAGE);
 }

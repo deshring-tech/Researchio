@@ -8,7 +8,9 @@
     "start": "next start",
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
-    "verify": "npm run typecheck && npm run lint && npm run build",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "verify": "npm run typecheck && npm run lint && npm run test && npm run build",
     "verify:e2e": "tsx --conditions react-server scripts/verify.ts",
     "ai:check": "tsx --conditions react-server scripts/ai-check.ts",
     "db:migrate": "prisma migrate dev",
@@ -38,6 +40,7 @@
     "eslint-config-next": "16.2.9",
     "prisma": "^6.19.3",
     "tsx": "^4.23.1",
-    "typescript": "^5"
+    "typescript": "^5",
+    "vitest": "^4.1.10"
   }
 }

@@ -356,6 +356,43 @@ async function verifyHttp(): Promise<void> {
     headers.headers.get('referrer-policy') === 'strict-origin-when-cross-origin',
   );
 
+  // Health probe. Orchestrators route traffic on this, so it must prove real
+  // dependencies rather than merely that the process is listening.
+  const health = await fetch(`${BASE_URL}/api/health`);
+  const healthBody = (await health.json()) as {
+    status?: string;
+    checks?: { database?: { ok?: boolean }; uploads?: { ok?: boolean } };
+  };
+
+  check('health endpoint returns 200', health.status === 200, `status ${health.status}`);
+  check('health reports ok', healthBody.status === 'ok', JSON.stringify(healthBody.status));
+  check('health verifies the database', healthBody.checks?.database?.ok === true);
+  check('health verifies the upload directory', healthBody.checks?.uploads?.ok === true);
+  check(
+    'health is never cached',
+    (health.headers.get('cache-control') ?? '').includes('no-store'),
+  );
+
+  // Content-Security-Policy.
+  const csp = headers.headers.get('content-security-policy') ?? '';
+  check('a CSP is set', csp.length > 0);
+  check('script-src carries a per-request nonce', /script-src[^;]*'nonce-[^']+'/.test(csp), csp.slice(0, 80));
+  check("script-src uses strict-dynamic", csp.includes("'strict-dynamic'"));
+  check("object-src is 'none'", csp.includes("object-src 'none'"));
+  check("frame-ancestors is 'none'", csp.includes("frame-ancestors 'none'"));
+  check("connect-src is confined to 'self'", csp.includes("connect-src 'self'"));
+  check(
+    'scripts may not run inline without a nonce',
+    !/script-src[^;]*'unsafe-inline'/.test(csp),
+  );
+
+  const secondCsp = (await fetch(`${BASE_URL}/login`)).headers.get('content-security-policy') ?? '';
+  const nonceOf = (value: string) => value.match(/'nonce-([^']+)'/)?.[1];
+  check(
+    'the nonce differs on every request',
+    Boolean(nonceOf(csp)) && nonceOf(csp) !== nonceOf(secondCsp),
+  );
+
   const chat = await fetch(`${BASE_URL}/api/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -633,6 +670,122 @@ async function verifyRegressions(): Promise<void> {
   await prisma.user.delete({ where: { id: user.id } });
 }
 
+/**
+ * Account management: password change, session revocation and full deletion.
+ *
+ * Exercised through the services rather than the HTTP forms, because Server
+ * Actions are invoked by a React-specific protocol rather than a plain POST.
+ */
+async function verifyAccountManagement(): Promise<void> {
+  const { createHash, randomBytes } = await import('node:crypto');
+  const {
+    changePassword,
+    deleteAccount,
+    updateProfile,
+    verifyCurrentPassword,
+  } = await import('../src/server/services/auth.service');
+
+  const stamp = Date.now();
+  const original = 'original-password-value';
+
+  const user = await prisma.user.create({
+    data: {
+      email: `account-${stamp}@researchio.local`,
+      name: 'Account Test',
+      passwordHash: await hashPassword(original),
+    },
+  });
+
+  // A project with an indexed chunk, to prove deletion cascades properly.
+  const project = await prisma.project.create({
+    data: { ownerId: user.id, name: 'To Be Deleted' },
+  });
+  const note = await prisma.note.create({
+    data: { projectId: project.id, content: 'A note that must not survive deletion.' },
+  });
+  await prisma.chunk.create({
+    data: {
+      projectId: project.id,
+      noteId: note.id,
+      content: note.content,
+      position: 0,
+      embedding: encodeEmbedding([0.1, 0.2, 0.3, 0.4]),
+    },
+  });
+
+  // Two sessions, so revocation can be observed.
+  const makeSession = async () => {
+    const token = randomBytes(32).toString('base64url');
+    await prisma.session.create({
+      data: {
+        tokenHash: createHash('sha256').update(token).digest('hex'),
+        userId: user.id,
+        expiresAt: new Date(Date.now() + 3_600_000),
+      },
+    });
+    return token;
+  };
+
+  await makeSession();
+  await makeSession();
+
+  check('sessions exist before a password change', (await prisma.session.count({ where: { userId: user.id } })) === 2);
+
+  // --- Password change
+  let rejected = false;
+  try {
+    await changePassword(user.id, {
+      currentPassword: 'not-the-right-password',
+      newPassword: 'a-brand-new-password',
+    });
+  } catch {
+    rejected = true;
+  }
+  check('changing a password requires the current one', rejected);
+
+  await changePassword(user.id, {
+    currentPassword: original,
+    newPassword: 'a-brand-new-password',
+  });
+
+  check('the new password now verifies', await verifyCurrentPassword(user.id, 'a-brand-new-password'));
+  check('the old password no longer verifies', !(await verifyCurrentPassword(user.id, original)));
+
+  // --- Profile
+  await updateProfile(user.id, { name: 'Renamed', email: `renamed-${stamp}@researchio.local` });
+  const renamed = await prisma.user.findUnique({ where: { id: user.id }, select: { name: true } });
+  check('profile updates persist', renamed?.name === 'Renamed');
+
+  const other = await prisma.user.create({
+    data: {
+      email: `taken-${stamp}@researchio.local`,
+      name: 'Taken',
+      passwordHash: await hashPassword('irrelevant-value-here'),
+    },
+  });
+
+  let conflicted = false;
+  try {
+    await updateProfile(user.id, { name: 'X', email: `taken-${stamp}@researchio.local` });
+  } catch {
+    conflicted = true;
+  }
+  check('an email already in use is rejected', conflicted);
+
+  // --- Deletion
+  const storageKeys = await deleteAccount(user.id);
+  check('deletion returns storage keys for file cleanup', Array.isArray(storageKeys));
+
+  const remainingUser = await prisma.user.findUnique({ where: { id: user.id } });
+  check('the user row is gone', remainingUser === null);
+  check('their projects are gone', (await prisma.project.count({ where: { id: project.id } })) === 0);
+  check('their notes are gone', (await prisma.note.count({ where: { projectId: project.id } })) === 0);
+  check('their indexed chunks are gone', (await prisma.chunk.count({ where: { projectId: project.id } })) === 0);
+  check('their sessions are gone', (await prisma.session.count({ where: { userId: user.id } })) === 0);
+
+  await prisma.user.delete({ where: { id: other.id } });
+}
+
 /** The assistant must remain reachable when the side panel is hidden. */
 async function verifyAssistantReachable(): Promise<void> {
   const fs = await import('node:fs/promises');
@@ -665,6 +818,7 @@ async function main(): Promise<void> {
   await section('Document text extraction', verifyPdfExtraction);
   await section('Database integration', verifyDatabase);
   await section('Regressions', verifyRegressions);
+  await section('Account management', verifyAccountManagement);
   await section('Assistant reachability', verifyAssistantReachable);
   await section(`HTTP surface (${BASE_URL})`, verifyHttp);
   await section('Authenticated workspace', verifyAuthenticatedPages);
