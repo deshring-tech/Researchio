@@ -75,6 +75,10 @@ export default async function PapersPage({
               methodology: paper.methodology,
               limitations: paper.limitations,
               chunkCount: paper._count.chunks,
+              hasPageNumbers:
+                paper.pageStarts !== null ||
+                !(paper.mimeType === 'application/pdf' ||
+                  paper.originalName.toLowerCase().endsWith('.pdf')),
             }))}
           />
         )}

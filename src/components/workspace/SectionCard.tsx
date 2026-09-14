@@ -2,7 +2,7 @@
 
 import { useActionState, useState } from 'react';
 
-import { ProseWithCitations } from '@/components/workspace/ProseWithCitations';
+import { CitationList, CitedProse } from '@/components/workspace/CitedProse';
 import { SubmitButton } from '@/components/ui/SubmitButton';
 import {
   acceptDraftAction,
@@ -13,11 +13,13 @@ import {
   setSectionStatusAction,
   updateSectionAction,
 } from '@/server/actions/document.actions';
+import type { SectionCitationView } from '@/lib/domain/citation';
 import {
   SECTION_STATUS_LABELS,
   asSectionStatus,
   type SectionStatus,
 } from '@/lib/domain/constants';
+import { citedOrdinals } from '@/lib/text/citations';
 import { LIMITS } from '@/lib/validation/schemas';
 import { wordCount } from '@/lib/format';
 import type { ActionResult } from '@/lib/errors';
@@ -33,12 +35,13 @@ import type { ActionResult } from '@/lib/errors';
  *   A generated draft is shown in a visually distinct block and is never merged
  *   into the researcher's text without an explicit accept. Accepting appends
  *   rather than overwrites, so no existing writing can be lost by a click.
+ *
+ * Citations
+ *   Accepted prose is rendered against accepted citations only; the draft is
+ *   rendered against all of them, since it may reuse ordinals already backing
+ *   accepted prose. Each gets its own anchor prefix so the two source lists can
+ *   share a page without colliding.
  */
-
-export interface SectionCitation {
-  id: string;
-  paperTitle: string | null;
-}
 
 export interface SectionView {
   id: string;
@@ -47,7 +50,7 @@ export interface SectionView {
   userContent: string | null;
   aiContent: string | null;
   status: string;
-  citations: SectionCitation[];
+  citations: SectionCitationView[];
 }
 
 const STATUS_TONE: Record<SectionStatus, string> = {
@@ -81,6 +84,11 @@ export function SectionCard({
   );
 
   const content = section.userContent?.trim() ?? '';
+  const accepted = section.citations.filter((citation) => citation.status === 'accepted');
+  const acceptedOrdinals = new Set(accepted.map((citation) => citation.ordinal));
+  const linkedSources = citedOrdinals(content).filter((ordinal) =>
+    acceptedOrdinals.has(ordinal),
+  ).length;
 
   return (
     <section className="card" id={`section-${section.id}`}>
@@ -94,10 +102,9 @@ export function SectionCard({
               {SECTION_STATUS_LABELS[status]}
             </span>
             <span className="text-xs muted">{wordCount(content)} words</span>
-            {section.citations.length > 0 ? (
+            {linkedSources > 0 ? (
               <span className="text-xs muted">
-                · {section.citations.length} linked source
-                {section.citations.length > 1 ? 's' : ''}
+                · {linkedSources} linked source{linkedSources > 1 ? 's' : ''}
               </span>
             ) : null}
           </div>
@@ -131,6 +138,10 @@ export function SectionCard({
             maxLength={LIMITS.sectionContentMax}
             autoFocus
           />
+          <p className="field-hint">
+            Keep the [S1]-style markers beside the claims they support. Removing a marker
+            removes that source from the section.
+          </p>
           <div className="row">
             <SubmitButton pendingLabel="Saving…">Save</SubmitButton>
             <button
@@ -145,9 +156,20 @@ export function SectionCard({
       ) : (
         <div>
           {content.length > 0 ? (
-            <div className="document-content">
-              <ProseWithCitations text={content} />
-            </div>
+            <>
+              <div className="document-content">
+                <CitedProse
+                  text={content}
+                  citations={accepted}
+                  anchorPrefix={`doc-${section.id}`}
+                />
+              </div>
+              <CitationList
+                text={content}
+                citations={accepted}
+                anchorPrefix={`doc-${section.id}`}
+              />
+            </>
           ) : (
             <p className="muted text-sm" style={{ fontStyle: 'italic' }}>
               Nothing written yet.
@@ -219,7 +241,7 @@ function DraftProposal({
 }: {
   sectionId: string;
   draft: string;
-  citations: SectionCitation[];
+  citations: SectionCitationView[];
 }) {
   const [acceptState, accept] = useActionState<ActionResult<undefined> | null, FormData>(
     acceptDraftAction,
@@ -235,32 +257,20 @@ function DraftProposal({
     (discardState && !discardState.ok && discardState.message) ||
     null;
 
-  const sourceTitles = citations
-    .map((citation) => citation.paperTitle)
-    .filter((title): title is string => Boolean(title));
-
   return (
     <div className="ai-draft">
       <span className="ai-draft-label">AI proposal · not yet part of your document</span>
 
       <div className="document-content" style={{ fontSize: '1rem' }}>
-        <ProseWithCitations text={draft} />
+        <CitedProse text={draft} citations={citations} anchorPrefix={`draft-${sectionId}`} />
       </div>
 
-      {sourceTitles.length > 0 ? (
-        <div className="stack-sm" style={{ marginTop: 'var(--spacing-3)' }}>
-          <span className="label" style={{ marginBottom: 0 }}>
-            Grounded in
-          </span>
-          <div className="row">
-            {[...new Set(sourceTitles)].map((title) => (
-              <span key={title} className="pill pill-ai">
-                {title}
-              </span>
-            ))}
-          </div>
-        </div>
-      ) : null}
+      <CitationList
+        text={draft}
+        citations={citations}
+        anchorPrefix={`draft-${sectionId}`}
+        heading="Grounded in"
+      />
 
       {error ? (
         <p className="field-error" role="alert">

@@ -15,11 +15,19 @@
  *   hard-split when a single sentence exceeds the limit. Consecutive chunks
  *   overlap so a claim spanning a boundary is still retrievable in full.
  *
+ * Offsets
+ *   Every chunk is an exact slice of the normalized text and carries its
+ *   `[start, end)` offsets into it. That is what lets a passage be mapped back
+ *   to the PDF page it came from. Rebuilding passages by joining fragments
+ *   with spaces — the previous approach — produced text that could no longer
+ *   be located in its own source.
+ *
+ * Public: `normalizeExtractedText`, `chunkSpans`, `chunkText`, `TextSpan`
  * Dependencies: none.
  */
 
 export interface ChunkOptions {
-  /** Target maximum characters per chunk. */
+  /** Maximum characters per chunk. Never exceeded. */
   maxChars?: number;
   /** Characters of trailing context repeated at the start of the next chunk. */
   overlapChars?: number;
@@ -33,129 +41,225 @@ const DEFAULTS = {
   minChars: 60,
 } as const satisfies Required<ChunkOptions>;
 
+/** A passage together with its position in the normalized text. */
+export interface TextSpan {
+  content: string;
+  /** Inclusive start offset. */
+  start: number;
+  /** Exclusive end offset. */
+  end: number;
+}
+
+interface Range {
+  start: number;
+  end: number;
+}
+
 /**
  * Collapses the whitespace damage typical of PDF text extraction: hyphenated
  * line breaks, single newlines mid-sentence, and runs of blank lines.
+ *
+ * The output contains only single spaces and `\n\n` paragraph breaks, and the
+ * function is idempotent. Idempotence matters: offsets computed against
+ * normalized text stay valid if that text is normalized again.
  */
 export function normalizeExtractedText(input: string): string {
-  return input
-    .replace(/\r\n?/g, '\n')
-    // Re-join words split across a line break by hyphenation.
-    .replace(/(\w)-\n(\w)/g, '$1$2')
-    // A single newline inside a sentence is a wrap artifact, not a paragraph.
-    .replace(/([^\n])\n([^\n])/g, '$1 $2')
-    .replace(/[ \t]+/g, ' ')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
+  return (
+    input
+      .replace(/\r\n?/g, '\n')
+      .replace(/[ \t]+/g, ' ')
+      // Strip spaces around newlines first, so a whitespace-only line still
+      // reads as a blank line (a paragraph break) rather than as a wrap.
+      .replace(/ ?\n ?/g, '\n')
+      // Re-join words split across a line break by hyphenation.
+      .replace(/(?<=\w)-\n(?=\w)/g, '')
+      // A single newline inside a sentence is a wrap artifact, not a paragraph.
+      // Lookarounds rather than captures: a capturing pattern consumes the
+      // character after the newline, which left one-character lines unjoined.
+      .replace(/(?<=[^\n])\n(?=[^\n])/g, ' ')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim()
+  );
 }
 
-function splitSentences(paragraph: string): string[] {
-  // Split after sentence-ending punctuation followed by whitespace.
-  const parts = paragraph.split(/(?<=[.!?])\s+/);
-  return parts.filter((part) => part.trim().length > 0);
+const WHITESPACE = /\s/;
+
+function isSpace(text: string, index: number): boolean {
+  return WHITESPACE.test(text[index] ?? '');
 }
 
-/** Hard-splits a fragment that has no usable internal boundary. */
-function splitOversized(fragment: string, maxChars: number): string[] {
-  const pieces: string[] = [];
-  for (let start = 0; start < fragment.length; start += maxChars) {
-    pieces.push(fragment.slice(start, start + maxChars));
+/** Shrinks a range so it neither starts nor ends on whitespace. */
+function trimRange(text: string, start: number, end: number): Range | null {
+  let from = start;
+  let to = end;
+
+  while (from < to && isSpace(text, from)) {
+    from += 1;
   }
+  while (to > from && isSpace(text, to - 1)) {
+    to -= 1;
+  }
+
+  return to > from ? { start: from, end: to } : null;
+}
+
+function sentencesOf(text: string, paragraph: Range): Range[] {
+  const body = text.slice(paragraph.start, paragraph.end);
+  const ranges: Range[] = [];
+  let cursor = 0;
+
+  // Break after sentence-ending punctuation followed by whitespace.
+  for (const match of body.matchAll(/(?<=[.!?])\s+/g)) {
+    const sentence = trimRange(text, paragraph.start + cursor, paragraph.start + match.index);
+    if (sentence) {
+      ranges.push(sentence);
+    }
+    cursor = match.index + match[0].length;
+  }
+
+  const last = trimRange(text, paragraph.start + cursor, paragraph.end);
+  if (last) {
+    ranges.push(last);
+  }
+
+  return ranges;
+}
+
+/** Splits a range with no usable internal boundary into fixed-size pieces. */
+function hardSplit(text: string, range: Range, maxChars: number): Range[] {
+  const pieces: Range[] = [];
+
+  for (let start = range.start; start < range.end; start += maxChars) {
+    const piece = trimRange(text, start, Math.min(start + maxChars, range.end));
+    if (piece) {
+      pieces.push(piece);
+    }
+  }
+
   return pieces;
 }
 
-/**
- * Returns the trailing `overlapChars` of a chunk, trimmed to a word boundary so
- * the carried context does not begin mid-word.
- */
-function tailOverlap(text: string, overlapChars: number): string {
-  if (overlapChars <= 0 || text.length <= overlapChars) {
-    return '';
-  }
+/** Breaks text into paragraph, sentence or hard-split ranges no longer than `maxChars`. */
+function fragmentsOf(text: string, maxChars: number): Range[] {
+  const fragments: Range[] = [];
 
-  const tail = text.slice(-overlapChars);
-  const firstSpace = tail.indexOf(' ');
-  return firstSpace === -1 ? tail : tail.slice(firstSpace + 1);
-}
-
-/**
- * Splits text into retrieval-sized passages.
- *
- * @returns Passages in reading order. Empty when the input has no usable text.
- */
-export function chunkText(input: string, options: ChunkOptions = {}): string[] {
-  const { maxChars, overlapChars, minChars } = { ...DEFAULTS, ...options };
-
-  const normalized = normalizeExtractedText(input);
-  if (normalized.length === 0) {
-    return [];
-  }
-
-  // Break paragraphs down until every fragment fits within maxChars.
-  const fragments: string[] = [];
-  for (const paragraph of normalized.split(/\n{2,}/)) {
-    const trimmed = paragraph.trim();
-    if (trimmed.length === 0) {
+  // Normalized text has no single newlines, so every line is a paragraph.
+  for (const match of text.matchAll(/[^\n]+/g)) {
+    const paragraph = trimRange(text, match.index, match.index + match[0].length);
+    if (!paragraph) {
       continue;
     }
 
-    if (trimmed.length <= maxChars) {
-      fragments.push(trimmed);
+    if (paragraph.end - paragraph.start <= maxChars) {
+      fragments.push(paragraph);
       continue;
     }
 
-    for (const sentence of splitSentences(trimmed)) {
-      if (sentence.length <= maxChars) {
+    for (const sentence of sentencesOf(text, paragraph)) {
+      if (sentence.end - sentence.start <= maxChars) {
         fragments.push(sentence);
       } else {
-        fragments.push(...splitOversized(sentence, maxChars));
+        fragments.push(...hardSplit(text, sentence, maxChars));
       }
     }
   }
 
-  // Greedily pack fragments into chunks, carrying overlap between them.
-  const chunks: string[] = [];
-  let current = '';
+  return fragments;
+}
 
-  const flush = () => {
-    const candidate = current.trim();
-    if (candidate.length > 0) {
-      chunks.push(candidate);
-    }
-    current = '';
-  };
-
-  for (const fragment of fragments) {
-    if (current.length === 0) {
-      current = fragment;
-      continue;
-    }
-
-    if (current.length + fragment.length + 1 <= maxChars) {
-      current += ` ${fragment}`;
-      continue;
-    }
-
-    // Clamp the carried overlap to whatever room the incoming fragment leaves.
-    // Without this, a full-size fragment plus a full-size overlap produces a
-    // chunk larger than `maxChars` — at the defaults, 1380 characters against a
-    // 1200 limit. Oversized passages risk silent truncation by the embedding
-    // API, which would drop the tail of the passage from the index while
-    // appearing to succeed.
-    const room = maxChars - fragment.length - 1;
-    const overlap = room > 0 ? tailOverlap(current, Math.min(overlapChars, room)) : '';
-
-    flush();
-    current = overlap.length > 0 ? `${overlap} ${fragment}` : fragment;
+/**
+ * Chooses where the next chunk begins, reaching back into the previous chunk to
+ * carry overlap.
+ *
+ * The overlap is clamped so the new chunk cannot exceed `maxChars`: oversized
+ * passages risk silent truncation by the embedding API, which drops the tail of
+ * a passage from the index while appearing to succeed. It always begins on a
+ * word boundary, never mid-word.
+ */
+function overlapStart(
+  text: string,
+  previous: Range,
+  next: Range,
+  maxChars: number,
+  overlapChars: number,
+): number {
+  if (overlapChars <= 0 || previous.end - previous.start <= overlapChars) {
+    return next.start;
   }
 
-  flush();
+  let start = Math.max(previous.end - overlapChars, next.end - maxChars, previous.start);
+  if (start >= previous.end) {
+    return next.start;
+  }
+
+  // Advance to the start of the next whole word.
+  if (start > previous.start && !isSpace(text, start - 1)) {
+    while (start < previous.end && !isSpace(text, start)) {
+      start += 1;
+    }
+  }
+  while (start < previous.end && isSpace(text, start)) {
+    start += 1;
+  }
+
+  return start < previous.end ? start : next.start;
+}
+
+/**
+ * Splits already-normalized text into retrieval-sized passages with offsets.
+ *
+ * @param normalized Output of `normalizeExtractedText`. Offsets refer to it.
+ * @returns Passages in reading order. Empty when the input has no usable text.
+ */
+export function chunkSpans(normalized: string, options: ChunkOptions = {}): TextSpan[] {
+  const { maxChars, overlapChars, minChars } = { ...DEFAULTS, ...options };
+
+  if (normalized.length === 0) {
+    return [];
+  }
+
+  const ranges: Range[] = [];
+  let current: Range | null = null;
+
+  for (const fragment of fragmentsOf(normalized, maxChars)) {
+    if (!current) {
+      current = { ...fragment };
+      continue;
+    }
+
+    // Each chunk is one contiguous slice, so extending it simply moves the end.
+    if (fragment.end - current.start <= maxChars) {
+      current.end = fragment.end;
+      continue;
+    }
+
+    ranges.push(current);
+    current = {
+      start: overlapStart(normalized, current, fragment, maxChars, overlapChars),
+      end: fragment.end,
+    };
+  }
+
+  if (current) {
+    ranges.push(current);
+  }
+
+  const spans = ranges.map((range) => ({
+    content: normalized.slice(range.start, range.end),
+    start: range.start,
+    end: range.end,
+  }));
 
   // Keep a short chunk only when it is the entire document, so that a one-line
   // note is still retrievable while page furniture is discarded.
-  if (chunks.length === 1) {
-    return chunks;
+  if (spans.length === 1) {
+    return spans;
   }
 
-  return chunks.filter((chunk) => chunk.length >= minChars);
+  return spans.filter((span) => span.content.length >= minChars);
+}
+
+/** Normalizes raw text and splits it into passages. */
+export function chunkText(input: string, options: ChunkOptions = {}): string[] {
+  return chunkSpans(normalizeExtractedText(input), options).map((span) => span.content);
 }

@@ -48,6 +48,9 @@ export interface RetrievedChunk {
   id: string;
   content: string;
   score: number;
+  /** Source pages the passage spans. Null for notes and page-less formats. */
+  pageStart: number | null;
+  pageEnd: number | null;
   source: ChunkSource;
 }
 
@@ -106,6 +109,8 @@ export async function retrieve(
       id: true,
       content: true,
       noteId: true,
+      pageStart: true,
+      pageEnd: true,
       paper: { select: { id: true, title: true } },
     },
   });
@@ -127,6 +132,17 @@ export async function retrieve(
         : null;
 
     // A chunk whose parent has been deleted is not citable.
-    return source ? [{ id: row.id, content: row.content, score: winner.score, source }] : [];
+    return source
+      ? [
+          {
+            id: row.id,
+            content: row.content,
+            score: winner.score,
+            pageStart: row.pageStart,
+            pageEnd: row.pageEnd,
+            source,
+          },
+        ]
+      : [];
   });
 }

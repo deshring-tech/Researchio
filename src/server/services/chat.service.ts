@@ -5,6 +5,7 @@ import { chatPrompt, sourceLabel } from '@/server/ai/prompts';
 import { retrieve, type RetrievedChunk } from '@/server/services/retrieval.service';
 import { assertProjectAccess } from '@/server/services/project.service';
 import { notFound } from '@/lib/errors';
+import { citedOrdinals } from '@/lib/text/citations';
 
 /**
  * MODULE: server/services/chat
@@ -18,7 +19,7 @@ import { notFound } from '@/lib/errors';
  *   persists the result, leaving transport to the Route Handler. That keeps the
  *   retrieval and persistence logic testable without an HTTP context.
  *
- * Public: `listMessages`, `prepareTurn`, `persistTurn`
+ * Public: `listMessages`, `prepareTurn`, `persistTurn`, `CitationRef`
  */
 
 /** Conversation turns included as context. Older turns are dropped. */
@@ -27,12 +28,20 @@ const HISTORY_TURNS = 6;
 /** Passages retrieved per question. */
 const SOURCE_LIMIT = 8;
 
-/** A citation as surfaced to the client. */
+/** Characters of each passage kept with an answer, for its source list. */
+const QUOTE_CHARS = 600;
+
+/** A citation as surfaced to the client and stored with an answer. */
 export interface CitationRef {
+  /** The `S3` in `[S3]`. */
   label: string;
   kind: 'paper' | 'note';
   id: string;
   title: string;
+  /** Absent on answers stored before page tracking. */
+  pageStart?: number | null;
+  pageEnd?: number | null;
+  quote?: string;
 }
 
 export interface PreparedTurn {
@@ -60,12 +69,12 @@ export async function listMessages(projectId: string, limit = 50) {
     id: message.id,
     role: message.role,
     content: message.content,
-    citations: parseCitations(message.citations),
+    citations: parseStoredCitations(message.citations),
     createdAt: message.createdAt,
   }));
 }
 
-function parseCitations(raw: string | null): CitationRef[] {
+function parseStoredCitations(raw: string | null): CitationRef[] {
   if (!raw) {
     return [];
   }
@@ -85,6 +94,9 @@ function toCitations(sources: readonly RetrievedChunk[]): CitationRef[] {
     kind: source.source.kind,
     id: source.source.id,
     title: source.source.kind === 'paper' ? source.source.title : 'Your note',
+    pageStart: source.pageStart,
+    pageEnd: source.pageEnd,
+    quote: source.content.slice(0, QUOTE_CHARS),
   }));
 }
 
@@ -133,6 +145,9 @@ export async function prepareTurn(
 /**
  * Stores a completed exchange.
  *
+ * Only sources the answer actually cites are kept with it: a passage that was
+ * retrieved but never used is not evidence for anything the answer says.
+ *
  * Both messages are written in one transaction so a failure cannot leave a
  * question in the history with no answer beneath it.
  */
@@ -142,7 +157,10 @@ export async function persistTurn(params: {
   answer: string;
   citations: readonly CitationRef[];
 }): Promise<void> {
-  const citations = params.citations.length > 0 ? JSON.stringify(params.citations) : null;
+  const cited = new Set(citedOrdinals(params.answer));
+  const used = params.citations.filter((citation) =>
+    cited.has(Number(citation.label.slice(1))),
+  );
 
   await prisma.$transaction([
     prisma.chatMessage.create({
@@ -153,7 +171,7 @@ export async function persistTurn(params: {
         projectId: params.projectId,
         role: 'assistant',
         content: params.answer,
-        citations,
+        citations: used.length > 0 ? JSON.stringify(used) : null,
       },
     }),
   ]);

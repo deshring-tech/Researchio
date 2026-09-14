@@ -1,13 +1,21 @@
 import 'server-only';
 
 import { prisma } from '@/server/db/prisma';
-import { ACADEMIC_SYSTEM_INSTRUCTION, sectionDraftPrompt } from '@/server/ai/prompts';
+import {
+  ACADEMIC_SYSTEM_INSTRUCTION,
+  declinedForLackOfMaterial,
+  sectionDraftPrompt,
+} from '@/server/ai/prompts';
 import { generateText } from '@/server/ai/provider';
 import { retrieve } from '@/server/services/retrieval.service';
 import { assertProjectAccess, assertSectionAccess, touchProject } from '@/server/services/project.service';
 import { recordEvent } from '@/server/services/timeline.service';
-import { AppError, notFound } from '@/lib/errors';
+import { logger } from '@/server/observability/logger';
+import type { SectionCitationView } from '@/lib/domain/citation';
 import type { SectionStatus } from '@/lib/domain/constants';
+import { AppError, notFound } from '@/lib/errors';
+import { citedOrdinals, renumberCitations } from '@/lib/text/citations';
+import { removeRestatedParagraphs } from '@/lib/text/overlap';
 
 /**
  * MODULE: server/services/document
@@ -22,15 +30,38 @@ import type { SectionStatus } from '@/lib/domain/constants';
  *   authorship unambiguous, which matters both academically and ethically —
  *   the tool must never quietly author someone's thesis.
  *
- *   Every draft also writes `CitationLink` rows recording exactly which
- *   passages grounded it, so provenance survives after the prose is accepted.
+ * The provenance contract
+ *   Every citation has an ordinal — the `n` in `[Sn]` — that is stable for the
+ *   life of its section. A new draft reuses the ordinal of any passage already
+ *   cited in accepted prose and numbers new passages after the highest one.
+ *   Only `pending` citations, which belong to the unreviewed draft, are ever
+ *   replaced or discarded.
+ *
+ *   The previous implementation deleted every citation on the section whenever
+ *   it drafted or discarded, so extending a section silently stripped the
+ *   provenance from prose that had already been accepted and repointed its
+ *   markers at unrelated sources.
  *
  * Public: `draftSection`, `acceptDraft`, `discardDraft`, `updateSectionContent`,
- *   `addSection`, `deleteSection`, `moveSection`, `buildChecklist`
+ *   `setSectionStatus`, `addSection`, `deleteSection`, `moveSection`,
+ *   `buildChecklist`, `toCitationView`
  */
 
 /** Passages retrieved to ground one section draft. */
 const DRAFT_SOURCE_LIMIT = 10;
+
+/**
+ * Characters of passage text snapshotted onto a citation.
+ *
+ * Generous on purpose: re-indexing a paper replaces its chunks and nulls the
+ * citation's `chunkId`, after which the snapshot is the only record of the
+ * evidence a claim rested on. Chunks are capped well below this, so in practice
+ * the whole passage is kept.
+ */
+const QUOTE_SNAPSHOT_CHARS = 2_000;
+
+const NOTHING_NEW_MESSAGE =
+  'Your sources contain nothing that adds to what this section already says. Upload more material or add notes, then try again.';
 
 async function loadSectionContext(sectionId: string) {
   const section = await prisma.section.findUnique({
@@ -50,6 +81,45 @@ async function loadSectionContext(sectionId: string) {
   }
 
   return section;
+}
+
+// ---------------------------------------------------------------------------
+// Citations
+// ---------------------------------------------------------------------------
+
+/** A stored citation together with the relations the workspace views load. */
+export interface CitationRow {
+  ordinal: number | null;
+  status: string;
+  quote: string | null;
+  pageStart: number | null;
+  pageEnd: number | null;
+  noteId: string | null;
+  paper: { id: string; title: string; authors: string | null; year: number | null } | null;
+}
+
+/**
+ * Converts a stored citation for display.
+ *
+ * @returns null for a row with no ordinal, which no marker can reference.
+ */
+export function toCitationView(citation: CitationRow): SectionCitationView | null {
+  if (citation.ordinal === null) {
+    return null;
+  }
+
+  return {
+    ordinal: citation.ordinal,
+    status: citation.status === 'accepted' ? 'accepted' : 'pending',
+    quote: citation.quote,
+    pageStart: citation.pageStart,
+    pageEnd: citation.pageEnd,
+    source: citation.paper
+      ? { kind: 'paper', ...citation.paper }
+      : citation.noteId
+        ? { kind: 'note', id: citation.noteId }
+        : { kind: 'missing' },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -85,7 +155,38 @@ export async function draftSection(userId: string, sectionId: string): Promise<s
     );
   }
 
-  const draft = await generateText(
+  // Ordinals already backing accepted prose keep meaning the same passage.
+  const accepted = await prisma.citationLink.findMany({
+    where: { sectionId, status: 'accepted' },
+    select: { chunkId: true, ordinal: true },
+  });
+
+  const acceptedOrdinalByChunk = new Map<string, number>();
+  let nextOrdinal = 1;
+
+  for (const citation of accepted) {
+    if (citation.ordinal === null) {
+      continue;
+    }
+    nextOrdinal = Math.max(nextOrdinal, citation.ordinal + 1);
+    if (citation.chunkId) {
+      acceptedOrdinalByChunk.set(citation.chunkId, citation.ordinal);
+    }
+  }
+
+  // The model sees sources numbered S1..Sn in prompt order; this maps each to
+  // the ordinal it carries within the section.
+  const ordinals = sources.map((source) => {
+    const existing = acceptedOrdinalByChunk.get(source.id);
+    if (existing !== undefined) {
+      return existing;
+    }
+    const assigned = nextOrdinal;
+    nextOrdinal += 1;
+    return assigned;
+  });
+
+  const generated = await generateText(
     sectionDraftPrompt({
       documentType: section.document.type,
       projectName: section.document.project.name,
@@ -98,31 +199,79 @@ export async function draftSection(userId: string, sectionId: string): Promise<s
     { systemInstruction: ACADEMIC_SYSTEM_INSTRUCTION, temperature: 0.35 },
   );
 
-  // Replace prior provenance for this section: the old citations belong to a
-  // draft that no longer exists.
+  // The model is told to decline when nothing in the sources adds to the
+  // section, rather than padding it with a restatement.
+  if (declinedForLackOfMaterial(generated)) {
+    throw new AppError('VALIDATION', NOTHING_NEW_MESSAGE);
+  }
+
+  // A marker numbered beyond the supplied sources has no referent and becomes
+  // `[S?]`, so the claim is flagged for review rather than looking supported.
+  const renumbered = renumberCitations(generated, (local) => ordinals[local - 1] ?? null);
+
+  // Accepting appends the draft to the researcher's prose, so a paragraph that
+  // restates what is already there would duplicate it. Models asked to extend
+  // a passage often rewrite it in full — in live testing an accepted extension
+  // repeated the entire section — so restatements are removed regardless of
+  // what the prompt asked for.
+  const existingContent = section.userContent?.trim() ?? '';
+  const { text: draft, removed } = existingContent
+    ? removeRestatedParagraphs(renumbered, existingContent)
+    : { text: renumbered.trim(), removed: 0 };
+
+  if (removed > 0) {
+    logger.info('Removed restated paragraphs from an extension draft', { sectionId, removed });
+  }
+
+  if (!draft) {
+    throw new AppError('VALIDATION', NOTHING_NEW_MESSAGE);
+  }
+
+  const cited = new Set(citedOrdinals(draft));
+  const reused = new Set(acceptedOrdinalByChunk.values());
+
+  // Provenance is recorded only for passages the draft actually cites — a
+  // retrieved passage the prose never uses is not evidence for it — and only
+  // once: an ordinal that already backs accepted prose keeps its existing row.
+  const newCitations = sources.flatMap((source, index) => {
+    const ordinal = ordinals[index];
+    if (!cited.has(ordinal) || reused.has(ordinal)) {
+      return [];
+    }
+
+    return [
+      {
+        sectionId,
+        chunkId: source.id,
+        paperId: source.source.kind === 'paper' ? source.source.id : null,
+        noteId: source.source.kind === 'note' ? source.source.id : null,
+        ordinal,
+        status: 'pending',
+        quote: source.content.slice(0, QUOTE_SNAPSHOT_CHARS),
+        pageStart: source.pageStart,
+        pageEnd: source.pageEnd,
+      },
+    ];
+  });
+
   await prisma.$transaction(async (tx) => {
-    await tx.citationLink.deleteMany({ where: { sectionId } });
+    // Replaces only the previous unreviewed draft's citations.
+    await tx.citationLink.deleteMany({ where: { sectionId, status: 'pending' } });
 
     await tx.section.update({
       where: { id: sectionId },
       data: { aiContent: draft, status: 'drafting', draftedAt: new Date() },
     });
 
-    await tx.citationLink.createMany({
-      data: sources.map((source) => ({
-        sectionId,
-        chunkId: source.id,
-        paperId: source.source.kind === 'paper' ? source.source.id : null,
-        noteId: source.source.kind === 'note' ? source.source.id : null,
-        quote: source.content.slice(0, 500),
-      })),
-    });
+    if (newCitations.length > 0) {
+      await tx.citationLink.createMany({ data: newCitations });
+    }
   });
 
   await recordEvent({
     projectId,
     type: 'SECTION_DRAFTED',
-    description: `Drafted "${section.title}" from ${sources.length} sources`,
+    description: `Drafted "${section.title}" citing ${cited.size} source${cited.size === 1 ? '' : 's'}`,
   });
 
   await touchProject(projectId);
@@ -134,7 +283,8 @@ export async function draftSection(userId: string, sectionId: string): Promise<s
  * Merges the pending draft into the researcher's content and clears it.
  *
  * Appends rather than overwrites, so accepting a draft can never destroy
- * existing prose.
+ * existing prose. The draft's citations become accepted in the same
+ * transaction, so later drafting leaves them alone.
  */
 export async function acceptDraft(userId: string, sectionId: string): Promise<string> {
   const projectId = await assertSectionAccess(sectionId, userId);
@@ -152,10 +302,16 @@ export async function acceptDraft(userId: string, sectionId: string): Promise<st
     ? `${section.userContent.trim()}\n\n${section.aiContent.trim()}`
     : section.aiContent.trim();
 
-  await prisma.section.update({
-    where: { id: sectionId },
-    data: { userContent: merged, aiContent: null, status: 'reviewing' },
-  });
+  await prisma.$transaction([
+    prisma.section.update({
+      where: { id: sectionId },
+      data: { userContent: merged, aiContent: null, status: 'reviewing' },
+    }),
+    prisma.citationLink.updateMany({
+      where: { sectionId, status: 'pending' },
+      data: { status: 'accepted' },
+    }),
+  ]);
 
   await recordEvent({
     projectId,
@@ -167,6 +323,7 @@ export async function acceptDraft(userId: string, sectionId: string): Promise<st
   return projectId;
 }
 
+/** Discards the pending draft and only the citations that belong to it. */
 export async function discardDraft(userId: string, sectionId: string): Promise<string> {
   const projectId = await assertSectionAccess(sectionId, userId);
 
@@ -175,17 +332,18 @@ export async function discardDraft(userId: string, sectionId: string): Promise<s
     select: { userContent: true },
   });
 
-  await prisma.section.update({
-    where: { id: sectionId },
-    data: {
-      aiContent: null,
-      // Returning to `incomplete` would be wrong if the researcher has written
-      // their own prose; only an empty section reverts.
-      status: section?.userContent?.trim() ? 'reviewing' : 'incomplete',
-    },
-  });
-
-  await prisma.citationLink.deleteMany({ where: { sectionId } });
+  await prisma.$transaction([
+    prisma.section.update({
+      where: { id: sectionId },
+      data: {
+        aiContent: null,
+        // Returning to `incomplete` would be wrong if the researcher has written
+        // their own prose; only an empty section reverts.
+        status: section?.userContent?.trim() ? 'reviewing' : 'incomplete',
+      },
+    }),
+    prisma.citationLink.deleteMany({ where: { sectionId, status: 'pending' } }),
+  ]);
 
   return projectId;
 }
@@ -194,6 +352,14 @@ export async function discardDraft(userId: string, sectionId: string): Promise<s
 // Section editing
 // ---------------------------------------------------------------------------
 
+/**
+ * Saves the researcher's prose.
+ *
+ * Accepted citations whose markers the researcher has deleted are pruned:
+ * otherwise the section keeps reporting sources for claims it no longer makes.
+ * Ordinals still referenced by a pending draft are kept, since that draft may
+ * reuse them.
+ */
 export async function updateSectionContent(
   userId: string,
   input: { sectionId: string; userContent: string },
@@ -201,13 +367,31 @@ export async function updateSectionContent(
   const projectId = await assertSectionAccess(input.sectionId, userId);
   const trimmed = input.userContent.trim();
 
-  await prisma.section.update({
+  const section = await prisma.section.findUnique({
     where: { id: input.sectionId },
-    data: {
-      userContent: trimmed || null,
-      status: trimmed ? 'reviewing' : 'incomplete',
-    },
+    select: { aiContent: true },
   });
+
+  const stillCited = [
+    ...new Set([...citedOrdinals(trimmed), ...citedOrdinals(section?.aiContent ?? '')]),
+  ];
+
+  await prisma.$transaction([
+    prisma.section.update({
+      where: { id: input.sectionId },
+      data: {
+        userContent: trimmed || null,
+        status: trimmed ? 'reviewing' : 'incomplete',
+      },
+    }),
+    prisma.citationLink.deleteMany({
+      where: {
+        sectionId: input.sectionId,
+        status: 'accepted',
+        ordinal: { notIn: stillCited },
+      },
+    }),
+  ]);
 
   await touchProject(projectId);
   return projectId;
@@ -331,7 +515,10 @@ interface ChecklistInput {
     title: string;
     userContent: string | null;
     status: string;
+    /** Accepted sources actually cited by the prose. */
     _citationCount: number;
+    /** Markers in the prose that resolve to no source. */
+    _brokenCitationCount?: number;
   }>;
   paperCount: number;
   noteCount: number;
@@ -372,6 +559,17 @@ export function buildChecklist(input: ChecklistInput): ChecklistItem[] {
         sectionId: section.id,
       });
       continue;
+    }
+
+    const broken = section._brokenCitationCount ?? 0;
+    if (broken > 0) {
+      items.push({
+        id: `broken-${section.id}`,
+        severity: 'error',
+        title: `"${section.title}" has citations that point to no source`,
+        detail: `${broken} citation${broken === 1 ? '' : 's'} cannot be traced to a source. Check those claims before relying on them.`,
+        sectionId: section.id,
+      });
     }
 
     if (content.length < THIN_SECTION_CHARS) {

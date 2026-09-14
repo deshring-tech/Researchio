@@ -66,6 +66,14 @@ Note ─────▶ chunk ──▶ embed ───────────�
 
 `CitationLink` is the point of the product. It ties a piece of drafted prose to the specific passage, paper and note that grounded it, and survives after the draft is accepted.
 
+Citations are built to be checked, not just displayed:
+
+- **Page-level.** PDFs are extracted page by page, so every passage — and every citation to it — records the pages it came from. Clicking a marker jumps to its source entry, which quotes the passage and opens the original PDF at that page.
+- **Stable.** A citation's number is fixed for the life of its section. Later drafts reuse it for the same passage and number new sources after it, and only an unreviewed draft's citations are ever replaced or discarded.
+- **Honest.** A marker that points at no supplied source renders as `?` and appears on the completion checklist, rather than being quietly dropped.
+- **Additive.** "Extend with AI" asks for new paragraphs only, and any paragraph that restates what the section already says is removed before it is shown, so accepting an extension cannot duplicate prose.
+- **Exportable.** Markdown export turns markers into numbered footnotes with page references and a reference list, which Pandoc carries through to Word or LaTeX.
+
 ### Layout
 
 | Path | Responsibility |
@@ -92,9 +100,9 @@ Two rules keep this honest:
 |---|---|
 | `npm run dev` | Development server |
 | `npm run build` / `npm start` | Production build and serve |
-| `npm run test` | 74 unit tests over the pure modules |
+| `npm run test` | 159 unit tests over the pure modules |
 | `npm run verify` | Typecheck, lint, unit tests, production build |
-| `npm run verify:e2e` | 103 assertions against the real stack (server must be running) |
+| `npm run verify:e2e` | 123 assertions against the real stack (server must be running) |
 | `npm run ai:check` | Live provider check — confirms the configured models still exist |
 | `npm run db:migrate` | Create and apply a migration after editing the schema |
 | `npm run db:studio` | Browse the database |
@@ -169,6 +177,8 @@ Stated plainly, because a tool that overstates itself is worse than one that doe
 - **Uploads accept PDF, plain text and Markdown only.** These are the formats the pipeline can genuinely read.
 - **Sessions expire 30 days after sign-in and do not slide.** Renewal needs a cookie write, which is not permitted during render; see the note in `src/server/auth/session.ts`.
 - **Papers are capped at 200 per project in the list view.** Notes paginate properly; papers do not yet.
+- **PDFs indexed before page tracking have no page numbers** until re-processed with the "Add page numbers" action on the Sources page. Citations made before that keep their quote but name no page.
+- **Restatement filtering is lexical.** It removes verbatim and near-verbatim repetition from extensions; a model that paraphrases the existing text freely can still slip past it.
 - **No password reset.** There is no email delivery, so a forgotten password cannot be recovered — only changed while signed in. Adding it means introducing an email provider.
 - **`style-src` permits `unsafe-inline`.** The UI uses React inline styles throughout and `next/font` injects an inline style element. `script-src` — the directive that actually stops injected code — remains strict and nonce-only.
 
@@ -178,9 +188,9 @@ Stated plainly, because a tool that overstates itself is worse than one that doe
 
 Two layers, deliberately.
 
-`npm run test` — 74 Vitest unit tests over the pure modules: chunking, vector maths, checklist rules, password hashing, validation, datasource resolution. Fast, no I/O.
+`npm run test` — 159 Vitest unit tests over the pure modules: chunking and page mapping, citation parsing and renumbering, restatement detection, Markdown export, vector maths, checklist rules, password hashing, validation, datasource resolution. Fast, no I/O.
 
-`npm run verify:e2e` — 103 assertions against the real database and a live server:
+`npm run verify:e2e` — 123 assertions against the real database and a live server:
 
 - PDF text extraction, from a PDF generated in-memory during the run
 - Embedding round-trips through the database, including the unaligned-buffer case
@@ -190,6 +200,10 @@ Two layers, deliberately.
 - Expired sessions rejected, path traversal blocked, security headers present
 - CSP carrying a fresh per-request nonce, with no `unsafe-inline` in `script-src`
 - Health endpoint proving real database and filesystem reachability
+- Citation markers rendering as links to quoted, page-referenced sources, and exporting as footnotes
+- Discarding, accepting and editing a section leaving accepted provenance intact
+
+If port 3000 is taken on your machine, run the server elsewhere and point the suite at it with `VERIFY_BASE_URL=http://localhost:4321`.
 
 ```bash
 npm run dev            # in one terminal

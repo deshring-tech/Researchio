@@ -2,24 +2,31 @@ import 'server-only';
 
 import { AppError } from '@/lib/errors';
 import { normalizeExtractedText } from '@/lib/text/chunk';
+import { joinPages, type PageStart } from '@/lib/text/pages';
 
 /**
  * MODULE: server/ingestion/extract
  *
  * Purpose
- *   Turn an uploaded file's bytes into plain text.
+ *   Turn an uploaded file's bytes into normalized plain text, recording where
+ *   each page begins so passages — and the citations built on them — can name
+ *   a page.
  *
  * Responsibilities
  *   - Dispatch on MIME type to the right extractor.
- *   - Normalize the result so downstream chunking sees consistent whitespace.
+ *   - Return text already normalized, with page offsets that refer to exactly
+ *     that string.
  *   - Fail with an actionable message when a document yields no text.
  *
  * Public: `extractText`, `ExtractionResult`
  */
 
 export interface ExtractionResult {
+  /** Normalized text. `pageStarts` offsets refer to exactly this string. */
   text: string;
   pageCount: number | null;
+  /** Where each page begins in `text`. Null for formats without pages. */
+  pageStarts: PageStart[] | null;
 }
 
 /** Text that is almost certainly extraction failure rather than a short document. */
@@ -34,7 +41,18 @@ async function extractPdf(bytes: Buffer): Promise<ExtractionResult> {
 
   try {
     const result = await parser.getText();
-    return { text: result.text ?? '', pageCount: result.total ?? null };
+    const pageCount = result.total ?? null;
+
+    // Per-page text is used rather than the concatenated `result.text`: the
+    // page boundaries are what let a citation point at a page.
+    if (result.pages.length > 0) {
+      const { text, pageStarts } = joinPages(
+        result.pages.map((page) => ({ page: page.num, text: page.text })),
+      );
+      return { text, pageCount, pageStarts };
+    }
+
+    return { text: normalizeExtractedText(result.text ?? ''), pageCount, pageStarts: null };
   } finally {
     // Releases the pdfjs worker. Skipping this leaks a worker per upload.
     await parser.destroy().catch(() => undefined);
@@ -42,7 +60,11 @@ async function extractPdf(bytes: Buffer): Promise<ExtractionResult> {
 }
 
 function extractPlainText(bytes: Buffer): ExtractionResult {
-  return { text: bytes.toString('utf8'), pageCount: null };
+  return {
+    text: normalizeExtractedText(bytes.toString('utf8')),
+    pageCount: null,
+    pageStarts: null,
+  };
 }
 
 /**
@@ -85,14 +107,12 @@ export async function extractText(params: {
     );
   }
 
-  const text = normalizeExtractedText(result.text);
-
-  if (text.length < MIN_USABLE_CHARS) {
+  if (result.text.length < MIN_USABLE_CHARS) {
     throw new AppError(
       'VALIDATION',
       `No readable text was found in "${originalName}". If this is a scanned document, it needs to be run through OCR first.`,
     );
   }
 
-  return { text, pageCount: result.pageCount };
+  return result;
 }

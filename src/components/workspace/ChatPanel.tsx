@@ -2,7 +2,9 @@
 
 import { useEffect, useRef, useState } from 'react';
 
+import { CitationList, CitedProse } from '@/components/workspace/CitedProse';
 import type { CitationRef } from '@/server/services/chat.service';
+import type { CitationView } from '@/lib/domain/citation';
 import { LIMITS } from '@/lib/validation/schemas';
 
 /**
@@ -20,6 +22,8 @@ import { LIMITS } from '@/lib/validation/schemas';
  *   - The transcript only auto-scrolls when the user is already near the
  *     bottom. Yanking the view down while someone is reading earlier output is
  *     a common and irritating bug in chat UIs.
+ *   - Answers render their `[S1]` markers as links into a source list showing
+ *     the quoted passage and page, the same way the document does.
  */
 
 export interface ChatMessageView {
@@ -200,28 +204,47 @@ export function ChatPanel({
   );
 }
 
+/** Adapts an answer's stored citations to the shared citation display shape. */
+function toCitationViews(citations: readonly CitationRef[]): CitationView[] {
+  return citations.flatMap((citation) => {
+    const ordinal = Number(citation.label.replace(/^S/, ''));
+    if (!Number.isInteger(ordinal) || ordinal < 1) {
+      return [];
+    }
+
+    const view: CitationView = {
+      ordinal,
+      quote: citation.quote ?? null,
+      pageStart: citation.pageStart ?? null,
+      pageEnd: citation.pageEnd ?? null,
+      source:
+        citation.kind === 'paper'
+          ? { kind: 'paper', id: citation.id, title: citation.title, authors: null, year: null }
+          : { kind: 'note', id: citation.id },
+    };
+
+    return [view];
+  });
+}
+
 function MessageBubble({ message }: { message: ChatMessageView }) {
-  return (
-    <div>
-      <div className="chat-bubble" data-role={message.role}>
+  if (message.role === 'user') {
+    return (
+      <div className="chat-bubble" data-role="user">
         {message.content}
       </div>
+    );
+  }
 
-      {message.citations.length > 0 ? (
-        <div
-          className="row"
-          style={{ gap: 'var(--spacing-1)', marginTop: 'var(--spacing-2)' }}
-        >
-          {message.citations.map((citation) => (
-            <span key={citation.label} className="pill pill-ai" title={citation.title}>
-              {citation.label} ·{' '}
-              {citation.title.length > 24
-                ? `${citation.title.slice(0, 24)}…`
-                : citation.title}
-            </span>
-          ))}
-        </div>
-      ) : null}
+  const citations = toCitationViews(message.citations);
+  const anchorPrefix = `msg-${message.id}`;
+
+  return (
+    <div>
+      <div className="chat-bubble" data-role="assistant">
+        <CitedProse text={message.content} citations={citations} anchorPrefix={anchorPrefix} />
+      </div>
+      <CitationList text={message.content} citations={citations} anchorPrefix={anchorPrefix} />
     </div>
   );
 }

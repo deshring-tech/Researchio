@@ -49,6 +49,11 @@ export interface PaperView {
   methodology: string | null;
   limitations: string | null;
   chunkCount: number;
+  /**
+   * False for a PDF indexed before page tracking. Its citations cannot name a
+   * page until it is extracted again.
+   */
+  hasPageNumbers: boolean;
 }
 
 const PILL_TONE: Record<IngestionStatus, string> = {
@@ -182,6 +187,24 @@ function PaperCard({ paper }: { paper: PaperView }) {
             <input type="hidden" name="paperId" value={paper.id} />
             <SubmitButton variant="secondary" size="sm" pendingLabel="Retrying…">
               Retry analysis
+            </SubmitButton>
+          </form>
+        ) : null}
+
+        {/*
+          Re-running ingestion re-extracts a PDF that predates page tracking,
+          so its passages — and future citations — gain page numbers.
+        */}
+        {status === 'ready' && !paper.hasPageNumbers ? (
+          <form action={retryAction}>
+            <input type="hidden" name="paperId" value={paper.id} />
+            <SubmitButton
+              variant="secondary"
+              size="sm"
+              pendingLabel="Re-processing…"
+              title="Re-extract this PDF so citations can name the page they came from"
+            >
+              Add page numbers
             </SubmitButton>
           </form>
         ) : null}

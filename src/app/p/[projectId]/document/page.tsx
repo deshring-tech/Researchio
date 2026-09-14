@@ -5,9 +5,14 @@ import { SectionCard } from '@/components/workspace/SectionCard';
 import { EmptyState } from '@/components/ui/Feedback';
 import { requireUser } from '@/server/auth/session';
 import { getProject } from '@/server/services/project.service';
-import { buildChecklist, type ChecklistSeverity } from '@/server/services/document.service';
+import {
+  buildChecklist,
+  toCitationView,
+  type ChecklistSeverity,
+} from '@/server/services/document.service';
 import { aiEnabled } from '@/server/ai/provider';
 import { wordCount } from '@/lib/format';
+import { citedOrdinals, countBrokenCitations } from '@/lib/text/citations';
 
 /**
  * The Living Document.
@@ -27,17 +32,34 @@ export default async function DocumentPage({
   const user = await requireUser();
   const project = await getProject(projectId, user.id);
 
-  const sections = project.document?.sections ?? [];
+  const sections = (project.document?.sections ?? []).map((section) => ({
+    ...section,
+    citationViews: section.citations.flatMap((row) => {
+      const view = toCitationView(row);
+      return view ? [view] : [];
+    }),
+  }));
+
   const showChecklist = tab === 'checklist';
 
   const checklist = buildChecklist({
-    sections: sections.map((section) => ({
-      id: section.id,
-      title: section.title,
-      userContent: section.userContent,
-      status: section.status,
-      _citationCount: section.citations.length,
-    })),
+    sections: sections.map((section) => {
+      const content = section.userContent ?? '';
+      const accepted = new Set(
+        section.citationViews
+          .filter((citation) => citation.status === 'accepted')
+          .map((citation) => citation.ordinal),
+      );
+
+      return {
+        id: section.id,
+        title: section.title,
+        userContent: section.userContent,
+        status: section.status,
+        _citationCount: citedOrdinals(content).filter((ordinal) => accepted.has(ordinal)).length,
+        _brokenCitationCount: countBrokenCitations(content, accepted),
+      };
+    }),
     paperCount: project.papers.length,
     noteCount: project.notes.length,
   });
@@ -109,10 +131,7 @@ export default async function DocumentPage({
                   userContent: section.userContent,
                   aiContent: section.aiContent,
                   status: section.status,
-                  citations: section.citations.map((citation) => ({
-                    id: citation.id,
-                    paperTitle: citation.paper?.title ?? null,
-                  })),
+                  citations: section.citationViews,
                 }}
               />
             ))

@@ -20,7 +20,12 @@ import { PrismaClient } from '@prisma/client';
 import { chunkText, normalizeExtractedText } from '../src/lib/text/chunk';
 import { decodeEmbedding, encodeEmbedding, normalize, similarity } from '../src/lib/vector';
 import { hashPassword, verifyPassword } from '../src/server/auth/password';
-import { buildChecklist } from '../src/server/services/document.service';
+import {
+  acceptDraft,
+  buildChecklist,
+  discardDraft,
+  updateSectionContent,
+} from '../src/server/services/document.service';
 import { resolveDatasourceUrl } from '../src/server/db/datasource';
 
 const prisma = new PrismaClient({ datasourceUrl: resolveDatasourceUrl() });
@@ -245,22 +250,26 @@ async function verifyDatabase(): Promise<void> {
 }
 
 /**
- * Builds a minimal but structurally valid single-page PDF containing known
- * text, with correctly computed xref offsets.
+ * Builds a minimal but structurally valid PDF with one line of known text per
+ * page, with correctly computed xref offsets.
  *
  * Generated rather than read from disk so this check depends on no fixture and
  * never touches unrelated files on the machine running it.
  */
-function buildMinimalPdf(sentence: string): Buffer {
-  const contentStream = `BT /F1 12 Tf 72 700 Td (${sentence}) Tj ET`;
-
-  const objects = [
+function buildPdf(pages: readonly string[]): Buffer {
+  const objects: string[] = [
     '<< /Type /Catalog /Pages 2 0 R >>',
-    '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
-    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>',
-    `<< /Length ${contentStream.length} >>\nstream\n${contentStream}\nendstream`,
+    `<< /Type /Pages /Kids [${pages.map((_, index) => `${4 + index * 2} 0 R`).join(' ')}] /Count ${pages.length} >>`,
     '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
   ];
+
+  pages.forEach((text, index) => {
+    const stream = `BT /F1 12 Tf 72 700 Td (${text}) Tj ET`;
+    objects.push(
+      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents ${5 + index * 2} 0 R /Resources << /Font << /F1 3 0 R >> >> >>`,
+      `<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`,
+    );
+  });
 
   let pdf = '%PDF-1.4\n';
   const offsets: number[] = [];
@@ -285,7 +294,7 @@ async function verifyPdfExtraction(): Promise<void> {
 
   const sentence =
     'Surface codes suppress logical errors when the physical error rate stays below threshold.';
-  const pdf = buildMinimalPdf(sentence);
+  const pdf = buildPdf([sentence]);
 
   const result = await extractText({
     bytes: pdf,
@@ -295,6 +304,27 @@ async function verifyPdfExtraction(): Promise<void> {
 
   check('PDF extraction recovers the embedded sentence', result.text.includes('Surface codes'), result.text.slice(0, 120));
   check('PDF extraction reports a page count', result.pageCount === 1, String(result.pageCount));
+
+  // Page tracking: each page must be locatable in the extracted text, which is
+  // what lets a citation name the page its passage came from.
+  const twoPages = await extractText({
+    bytes: buildPdf([
+      'Page one covers the surface code threshold.',
+      'Page two reports the correlated noise results.',
+    ]),
+    mimeType: 'application/pdf',
+    originalName: 'two-pages.pdf',
+  });
+  const secondPage = twoPages.pageStarts?.[1];
+
+  check('a multi-page PDF reports every page', twoPages.pageCount === 2, String(twoPages.pageCount));
+  check(
+    'each page is located within the extracted text',
+    twoPages.pageStarts?.length === 2 &&
+      !!secondPage &&
+      twoPages.text.slice(secondPage[1]).startsWith('Page two'),
+    JSON.stringify(twoPages.pageStarts),
+  );
 
   const text = await extractText({
     bytes: Buffer.from('A plain text source document about quantum error correction research.'),
@@ -416,6 +446,27 @@ async function verifyHttp(): Promise<void> {
 }
 
 /**
+ * Creates a live session for a user and returns it as a Cookie header value.
+ *
+ * A test harness over the server's own session format: only the token's hash is
+ * stored, exactly as `createSession` does.
+ */
+async function sessionCookieFor(userId: string): Promise<string> {
+  const { createHash, randomBytes } = await import('node:crypto');
+  const token = randomBytes(32).toString('base64url');
+
+  await prisma.session.create({
+    data: {
+      tokenHash: createHash('sha256').update(token).digest('hex'),
+      userId,
+      expiresAt: new Date(Date.now() + 3_600_000),
+    },
+  });
+
+  return `researchio_session=${token}`;
+}
+
+/**
  * Renders the authenticated workspace over real HTTP.
  *
  * A session row is created directly and its token sent as a cookie. This is a
@@ -460,20 +511,8 @@ async function verifyAuthenticatedPages(): Promise<void> {
     },
   });
 
-  async function sessionFor(userId: string): Promise<string> {
-    const token = randomBytes(32).toString('base64url');
-    await prisma.session.create({
-      data: {
-        tokenHash: createHash('sha256').update(token).digest('hex'),
-        userId,
-        expiresAt: new Date(Date.now() + 3_600_000),
-      },
-    });
-    return `researchio_session=${token}`;
-  }
-
-  const ownerCookie = await sessionFor(owner.id);
-  const intruderCookie = await sessionFor(intruder.id);
+  const ownerCookie = await sessionCookieFor(owner.id);
+  const intruderCookie = await sessionCookieFor(intruder.id);
 
   const get = (path: string, cookie: string) =>
     fetch(`${BASE_URL}${path}`, { headers: { Cookie: cookie }, redirect: 'manual' });
@@ -786,6 +825,233 @@ async function verifyAccountManagement(): Promise<void> {
   await prisma.user.delete({ where: { id: other.id } });
 }
 
+/**
+ * Citation provenance: how citations render and export, and what discard,
+ * accept and editing do to them.
+ *
+ * Drafting needs a live provider, so draft citation rows are inserted directly;
+ * everything that happens to them afterwards is exercised for real. The earlier
+ * implementation deleted every citation on a section when drafting or
+ * discarding, stripping provenance from prose that had already been accepted.
+ */
+async function verifyCitationProvenance(): Promise<void> {
+  const probe = await fetch(BASE_URL, { redirect: 'manual' }).catch(() => null);
+  if (!probe) {
+    console.log('  SKIP  dev server not reachable');
+    return;
+  }
+
+  const owner = await prisma.user.create({
+    data: {
+      email: `citations-${Date.now()}@researchio.local`,
+      name: 'Citations',
+      passwordHash: await hashPassword('irrelevant-value-here'),
+    },
+  });
+
+  try {
+    const project = await prisma.project.create({
+      data: {
+        ownerId: owner.id,
+        name: 'Cardiac Regeneration',
+        document: {
+          create: {
+            type: 'Thesis',
+            sections: {
+              create: [
+                {
+                  title: 'Discussion',
+                  position: 0,
+                  status: 'drafting',
+                  userContent:
+                    'Cardiomyocytes proliferate after injury [S1]. Scar tissue resolves within weeks [S2]. A claim with no traceable source [S?].',
+                  // Reuses accepted S1 and introduces pending S3 in one marker.
+                  aiContent: 'Regeneration also depends on the epicardium [S1, S3].',
+                },
+              ],
+            },
+          },
+        },
+      },
+      include: { document: { include: { sections: true } } },
+    });
+
+    const sectionId = project.document!.sections[0].id;
+
+    const paper = await prisma.paper.create({
+      data: {
+        projectId: project.id,
+        title: 'Heart Regeneration in Zebrafish',
+        authors: 'Poss, K.',
+        year: 2002,
+        originalName: 'poss-2002.pdf',
+        mimeType: 'application/pdf',
+        sizeBytes: 1,
+        status: 'ready',
+      },
+    });
+
+    const note = await prisma.note.create({
+      data: { projectId: project.id, content: 'Scar resolved by day thirty in my imaging.' },
+    });
+
+    await prisma.citationLink.createMany({
+      data: [
+        {
+          sectionId,
+          paperId: paper.id,
+          ordinal: 1,
+          status: 'accepted',
+          quote: 'Cardiomyocytes re-enter the cell cycle after amputation',
+          pageStart: 3,
+          pageEnd: 3,
+        },
+        {
+          sectionId,
+          noteId: note.id,
+          ordinal: 2,
+          status: 'accepted',
+          quote: 'Scar resolved by day thirty in my imaging.',
+        },
+        {
+          sectionId,
+          paperId: paper.id,
+          ordinal: 3,
+          status: 'pending',
+          quote: 'The epicardium activates organ-wide after injury',
+          pageStart: 5,
+          pageEnd: 6,
+        },
+      ],
+    });
+
+    const cookie = await sessionCookieFor(owner.id);
+    const get = (path: string) =>
+      fetch(`${BASE_URL}${path}`, { headers: { Cookie: cookie }, redirect: 'manual' });
+
+    // --- Rendering
+    const documentHtml = await (await get(`/p/${project.id}/document`)).text();
+
+    check(
+      'a marker in accepted prose links to its source entry',
+      documentHtml.includes(`href="#doc-${sectionId}-s1"`),
+    );
+    check(
+      'the source entry carries the matching anchor',
+      documentHtml.includes(`id="doc-${sectionId}-s1"`),
+    );
+    check(
+      'a paper citation opens the original at its page',
+      documentHtml.includes('Open at p. 3') &&
+        documentHtml.includes(`/api/papers/${paper.id}/file#page=3`),
+    );
+    check(
+      'grouped markers render each source as a link',
+      documentHtml.includes(`href="#draft-${sectionId}-s1"`) &&
+        documentHtml.includes(`href="#draft-${sectionId}-s3"`),
+    );
+    check(
+      'a new draft source is listed with its page range',
+      documentHtml.includes(`id="draft-${sectionId}-s3"`) && documentHtml.includes('Open at pp. 5–6'),
+    );
+    check(
+      'a citation to no source is flagged rather than dropped',
+      documentHtml.includes('Unresolved citation'),
+    );
+
+    const checklistHtml = await (await get(`/p/${project.id}/document?tab=checklist`)).text();
+    check(
+      'the checklist reports citations that point to no source',
+      checklistHtml.includes('citations that point to no source'),
+    );
+
+    // A PDF indexed before page tracking offers a way to gain page numbers.
+    const papersHtml = await (await get(`/p/${project.id}/papers`)).text();
+    check(
+      'a PDF without page tracking offers to add page numbers',
+      papersHtml.includes('Add page numbers'),
+    );
+
+    // --- Export
+    const markdown = await (await get(`/api/projects/${project.id}/export`)).text();
+
+    check(
+      'export turns markers into footnotes',
+      markdown.includes('proliferate after injury [^1].') && !/\[S\d/.test(markdown),
+    );
+    check(
+      'export footnotes name the page',
+      markdown.includes('[^1]: Poss, K. (2002). *Heart Regeneration in Zebrafish*, p. 3.'),
+    );
+    check("export attributes a note as the researcher's own", markdown.includes("[^2]: Researcher's note."));
+    check('export flags a citation to no source', markdown.includes('[citation needed]'));
+    check('export leaves out the unreviewed draft', !markdown.includes('epicardium'));
+
+    // --- Discard, accept, edit
+    const citationState = async () =>
+      (
+        await prisma.citationLink.findMany({ where: { sectionId }, orderBy: { ordinal: 'asc' } })
+      ).map((row) => `${row.ordinal}:${row.status}`);
+
+    await discardDraft(owner.id, sectionId);
+    check(
+      'discarding a draft removes only its pending citations',
+      (await citationState()).join(',') === '1:accepted,2:accepted',
+      (await citationState()).join(','),
+    );
+
+    await prisma.section.update({
+      where: { id: sectionId },
+      data: { aiContent: 'The epicardium matters too [S3].', status: 'drafting' },
+    });
+    await prisma.citationLink.create({
+      data: { sectionId, paperId: paper.id, ordinal: 3, status: 'pending', quote: 'Epicardium', pageStart: 5, pageEnd: 6 },
+    });
+
+    await acceptDraft(owner.id, sectionId);
+    check(
+      'accepting promotes the draft citations and keeps the existing ones',
+      (await citationState()).join(',') === '1:accepted,2:accepted,3:accepted',
+      (await citationState()).join(','),
+    );
+
+    const merged = await prisma.section.findUniqueOrThrow({
+      where: { id: sectionId },
+      select: { userContent: true },
+    });
+    check(
+      'accepted prose keeps its original markers',
+      (merged.userContent ?? '').startsWith('Cardiomyocytes proliferate after injury [S1].'),
+    );
+
+    await updateSectionContent(owner.id, {
+      sectionId,
+      userContent: 'Cardiomyocytes proliferate after injury [S1]. The epicardium matters too [S3].',
+    });
+    check(
+      'removing a marker while editing prunes that citation',
+      (await citationState()).join(',') === '1:accepted,3:accepted',
+      (await citationState()).join(','),
+    );
+
+    await prisma.section.update({
+      where: { id: sectionId },
+      data: { aiContent: 'The epicardium again [S3].' },
+    });
+    await updateSectionContent(owner.id, {
+      sectionId,
+      userContent: 'Cardiomyocytes proliferate after injury [S1].',
+    });
+    check(
+      'a citation still referenced by a pending draft survives an edit',
+      (await citationState()).join(',') === '1:accepted,3:accepted',
+      (await citationState()).join(','),
+    );
+  } finally {
+    await prisma.user.delete({ where: { id: owner.id } });
+  }
+}
+
 /** The assistant must remain reachable when the side panel is hidden. */
 async function verifyAssistantReachable(): Promise<void> {
   const fs = await import('node:fs/promises');
@@ -822,6 +1088,7 @@ async function main(): Promise<void> {
   await section('Assistant reachability', verifyAssistantReachable);
   await section(`HTTP surface (${BASE_URL})`, verifyHttp);
   await section('Authenticated workspace', verifyAuthenticatedPages);
+  await section('Citation provenance', verifyCitationProvenance);
 
   console.log('\n' + '='.repeat(40));
   console.log(`${passed} passed, ${failures.length} failed`);

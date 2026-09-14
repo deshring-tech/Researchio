@@ -2,7 +2,9 @@ import 'server-only';
 
 import { prisma } from '@/server/db/prisma';
 import { embedTexts } from '@/server/ai/provider';
-import { chunkText } from '@/lib/text/chunk';
+import { logger } from '@/server/observability/logger';
+import { chunkSpans, chunkText, normalizeExtractedText } from '@/lib/text/chunk';
+import { pageRangeOf, type PageStart } from '@/lib/text/pages';
 import { encodeEmbedding } from '@/lib/vector';
 
 /**
@@ -13,6 +15,7 @@ import { encodeEmbedding } from '@/lib/vector';
  *
  * Responsibilities
  *   - Chunk text, embed each passage, and persist the vectors.
+ *   - Record the pages each passage spans, so citations can name them.
  *   - Keep the index consistent with its source: reindexing replaces the
  *     previous chunks atomically rather than appending duplicates.
  *
@@ -26,9 +29,14 @@ interface IndexTarget {
   noteId?: string;
 }
 
+interface Passage {
+  content: string;
+  pageStart: number | null;
+  pageEnd: number | null;
+}
+
 /**
- * Chunks, embeds and stores `text`, replacing any existing chunks for the
- * target.
+ * Embeds and stores passages, replacing any existing chunks for the target.
  *
  * The delete and the insert share a transaction, so a failure mid-way cannot
  * leave a source partially indexed and silently under-retrieved.
@@ -39,22 +47,22 @@ interface IndexTarget {
  *
  * @returns Number of chunks written.
  */
-async function replaceChunks(target: IndexTarget, text: string): Promise<number> {
-  const passages = chunkText(text);
-
+async function replaceChunks(target: IndexTarget, passages: readonly Passage[]): Promise<number> {
   if (passages.length === 0) {
     await deleteChunksFor(target);
     return 0;
   }
 
-  const vectors = await embedTexts(passages);
+  const vectors = await embedTexts(passages.map((passage) => passage.content));
 
-  const rows = passages.map((content, position) => ({
+  const rows = passages.map((passage, position) => ({
     projectId: target.projectId,
     paperId: target.paperId ?? null,
     noteId: target.noteId ?? null,
-    content,
+    content: passage.content,
     position,
+    pageStart: passage.pageStart,
+    pageEnd: passage.pageEnd,
     embedding: encodeEmbedding(vectors[position]),
   }));
 
@@ -84,13 +92,41 @@ export async function indexNote(params: {
   projectId: string;
   content: string;
 }): Promise<number> {
-  return replaceChunks({ projectId: params.projectId, noteId: params.noteId }, params.content);
+  const passages = chunkText(params.content).map((content) => ({
+    content,
+    pageStart: null,
+    pageEnd: null,
+  }));
+
+  return replaceChunks({ projectId: params.projectId, noteId: params.noteId }, passages);
 }
 
 export async function indexPaper(params: {
   paperId: string;
   projectId: string;
   text: string;
+  pageStarts: readonly PageStart[] | null;
 }): Promise<number> {
-  return replaceChunks({ projectId: params.projectId, paperId: params.paperId }, params.text);
+  const normalized = normalizeExtractedText(params.text);
+
+  // Page offsets are only meaningful against the exact string they were
+  // computed on. Text stored before normalization rules changed would shift
+  // every offset, so its page information is discarded rather than attached to
+  // the wrong pages — a missing page number is better than a false one.
+  const pageStarts = normalized === params.text ? params.pageStarts : null;
+
+  if (params.pageStarts && !pageStarts) {
+    logger.warn('Discarding page offsets that no longer match the stored text', {
+      paperId: params.paperId,
+    });
+  }
+
+  const passages = chunkSpans(normalized).map((span) => ({
+    content: span.content,
+    ...(pageStarts
+      ? pageRangeOf(pageStarts, span.start, span.end)
+      : { pageStart: null, pageEnd: null }),
+  }));
+
+  return replaceChunks({ projectId: params.projectId, paperId: params.paperId }, passages);
 }

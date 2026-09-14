@@ -1,6 +1,8 @@
 import { requireUser } from '@/server/auth/session';
 import { getProject } from '@/server/services/project.service';
+import { toCitationView } from '@/server/services/document.service';
 import { logger } from '@/server/observability/logger';
+import { renderMarkdown } from '@/lib/export/markdown';
 import { AppError } from '@/lib/errors';
 import { formatDate } from '@/lib/format';
 
@@ -8,17 +10,16 @@ import { formatDate } from '@/lib/format';
  * ROUTE: GET /api/projects/[projectId]/export
  *
  * Purpose
- *   Export the living document as Markdown.
+ *   Export the living document as Markdown with footnoted citations and a
+ *   reference list.
  *
  * Why Markdown
- *   It is lossless for what this document actually contains, opens everywhere,
- *   and converts cleanly to Word or LaTeX via Pandoc. The original UI offered
- *   an "Export to Word" button that did nothing; shipping a format that
- *   genuinely round-trips is more useful than a heavier one that half-works.
+ *   It is lossless for what this document contains, opens everywhere, and
+ *   converts to Word or LaTeX via Pandoc with footnotes intact.
  *
- *   Only accepted prose is exported. Pending AI proposals are excluded by
- *   design — an unreviewed draft must never leave the app looking like
- *   finished work.
+ *   Only accepted prose and accepted citations are exported. Pending AI
+ *   proposals are excluded by design — an unreviewed draft must never leave
+ *   the app looking like finished work.
  */
 
 function slugify(value: string): string {
@@ -40,35 +41,23 @@ export async function GET(
     const user = await requireUser();
     const project = await getProject(projectId, user.id);
 
-    const lines: string[] = [
-      `# ${project.name}`,
-      '',
-      `*${project.document?.type ?? 'Document'} — exported ${formatDate(new Date())}*`,
-      '',
-    ];
-
-    if (project.researchQuestion) {
-      lines.push(`> **Research question:** ${project.researchQuestion}`, '');
-    }
-
-    for (const section of project.document?.sections ?? []) {
-      lines.push(`## ${section.title}`, '');
-      lines.push(section.userContent?.trim() || '*This section has not been written yet.*', '');
-    }
-
-    const papers = project.papers.filter((paper) => paper.status === 'ready');
-    if (papers.length > 0) {
-      lines.push('## Sources', '');
-      for (const paper of papers) {
-        const parts = [paper.authors, paper.year?.toString(), `*${paper.title}*`]
-          .filter(Boolean)
-          .join('. ');
-        lines.push(`- ${parts}`);
-      }
-      lines.push('');
-    }
-
-    const body = lines.join('\n');
+    const body = renderMarkdown({
+      name: project.name,
+      documentType: project.document?.type ?? 'Document',
+      researchQuestion: project.researchQuestion,
+      exportedOn: formatDate(new Date()),
+      sections: (project.document?.sections ?? []).map((section) => ({
+        title: section.title,
+        content: section.userContent,
+        citations: section.citations.flatMap((row) => {
+          const view = toCitationView(row);
+          return view && view.status === 'accepted' ? [view] : [];
+        }),
+      })),
+      consultedSources: project.papers
+        .filter((paper) => paper.status === 'ready')
+        .map((paper) => ({ title: paper.title, authors: paper.authors, year: paper.year })),
+    });
 
     return new Response(body, {
       headers: {

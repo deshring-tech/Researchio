@@ -110,6 +110,18 @@ export const SECTION_STATUS_LABELS: Record<SectionStatus, string> = {
 };
 
 // ---------------------------------------------------------------------------
+// Citations
+// ---------------------------------------------------------------------------
+
+/**
+ * `pending` citations belong to an unreviewed AI draft and are replaced or
+ * discarded along with it. `accepted` citations back prose in the document and
+ * are never touched by later drafting.
+ */
+export const CITATION_STATUSES = ['pending', 'accepted'] as const;
+export type CitationStatus = (typeof CITATION_STATUSES)[number];
+
+// ---------------------------------------------------------------------------
 // Ingestion
 // ---------------------------------------------------------------------------
 

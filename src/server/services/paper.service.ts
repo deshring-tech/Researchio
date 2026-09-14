@@ -11,6 +11,7 @@ import { deleteChunksFor, indexPaper } from '@/server/services/indexing.service'
 import { assertProjectAccess, touchProject } from '@/server/services/project.service';
 import { recordEvent } from '@/server/services/timeline.service';
 import { logger } from '@/server/observability/logger';
+import { parsePageStarts } from '@/lib/text/pages';
 import { AppError, notFound } from '@/lib/errors';
 import type { IngestionStatus } from '@/lib/domain/constants';
 
@@ -133,6 +134,7 @@ export async function ingestPaper(paperId: string): Promise<void> {
       mimeType: true,
       storageKey: true,
       extractedText: true,
+      pageStarts: true,
     },
   });
 
@@ -143,9 +145,16 @@ export async function ingestPaper(paperId: string): Promise<void> {
   try {
     await setStatus(paperId, 'processing');
 
-    // Reuse text from a previous partial run rather than re-parsing the PDF.
+    const isPdf =
+      paper.mimeType === 'application/pdf' || paper.originalName.toLowerCase().endsWith('.pdf');
+
+    // Reuse text from a previous run rather than re-parsing — except for a PDF
+    // extracted before page tracking, where re-parsing is the only way to give
+    // its citations page numbers.
     let text = paper.extractedText;
-    if (!text) {
+    let pageStarts = parsePageStarts(paper.pageStarts);
+
+    if (!text || (isPdf && !pageStarts)) {
       const bytes = await readUpload(paper.storageKey);
       const extracted = await extractText({
         bytes,
@@ -154,9 +163,15 @@ export async function ingestPaper(paperId: string): Promise<void> {
       });
 
       text = extracted.text;
+      pageStarts = extracted.pageStarts;
+
       await prisma.paper.update({
         where: { id: paperId },
-        data: { extractedText: text, pageCount: extracted.pageCount },
+        data: {
+          extractedText: text,
+          pageCount: extracted.pageCount,
+          pageStarts: pageStarts ? JSON.stringify(pageStarts) : null,
+        },
       });
     }
 
@@ -171,7 +186,7 @@ export async function ingestPaper(paperId: string): Promise<void> {
       return;
     }
 
-    await indexPaper({ paperId, projectId: paper.projectId, text });
+    await indexPaper({ paperId, projectId: paper.projectId, text, pageStarts });
     await analysePaper(paperId, paper.originalName, text);
 
     await setStatus(paperId, 'ready');

@@ -1,6 +1,7 @@
 import 'server-only';
 
 import type { RetrievedChunk } from '@/server/services/retrieval.service';
+import { formatPageRange } from '@/lib/text/pages';
 
 /**
  * MODULE: server/ai/prompts
@@ -16,7 +17,8 @@ import type { RetrievedChunk } from '@/server/services/retrieval.service';
  *   damaging failure mode of a tool like this.
  *
  * Public: `ACADEMIC_SYSTEM_INSTRUCTION`, `buildSourceContext`,
- *   `paperAnalysisPrompt`, `chatPrompt`, `sectionDraftPrompt`
+ *   `paperAnalysisPrompt`, `chatPrompt`, `sectionDraftPrompt`,
+ *   `declinedForLackOfMaterial`
  */
 
 export const ACADEMIC_SYSTEM_INSTRUCTION = `You are a rigorous research assistant supporting a working academic.
@@ -24,13 +26,26 @@ export const ACADEMIC_SYSTEM_INSTRUCTION = `You are a rigorous research assistan
 Rules you must always follow:
 - Ground every factual claim in the provided sources. Never invent findings, statistics, author names, or citations.
 - When the sources do not answer the question, say so explicitly and state what evidence would be needed.
-- Cite sources inline using the bracketed markers given to you, for example [S1].
+- Cite sources inline using the bracketed markers given to you, for example [S1]. For a claim resting on several sources, combine them in one marker, for example [S1, S3].
+- Use only the marker numbers you were given. Never invent a marker for a source that was not supplied.
 - Prefer precise, measured academic register. No marketing language, no hedging filler, no bullet-point padding.
 - Never claim certainty the evidence does not support.`;
 
 /** How a retrieved passage is labelled in prompts and rendered back in the UI. */
 export function sourceLabel(index: number): string {
   return `S${index + 1}`;
+}
+
+/**
+ * The reply requested when a section is being extended and nothing in the
+ * sources adds to it. Declining is the honest outcome; padding the section with
+ * a restatement of what it already says is not.
+ */
+const NO_NEW_MATERIAL = 'NO_NEW_MATERIAL';
+
+/** True when the model declined to extend a section for lack of new material. */
+export function declinedForLackOfMaterial(output: string): boolean {
+  return new RegExp(`^\\W*${NO_NEW_MATERIAL}\\W*$`).test(output.trim());
 }
 
 /**
@@ -46,9 +61,10 @@ export function buildSourceContext(chunks: readonly RetrievedChunk[], maxCharsPe
 
   return chunks
     .map((chunk, index) => {
+      const pages = formatPageRange(chunk.pageStart, chunk.pageEnd);
       const origin =
         chunk.source.kind === 'paper'
-          ? `Paper: ${chunk.source.title}`
+          ? `Paper: ${chunk.source.title}${pages ? `, ${pages}` : ''}`
           : "Researcher's own note";
 
       const body =
@@ -194,13 +210,13 @@ ${buildSourceContext(params.sources)}
 
 ${
   existing
-    ? `--- THE RESEARCHER'S EXISTING DRAFT ---\n${existing}\n--- END EXISTING DRAFT ---\n\nExtend and strengthen this existing draft. Preserve the researcher's argument, voice and terminology. Do not contradict or discard what they have written.`
+    ? `--- THE RESEARCHER'S EXISTING TEXT ---\n${existing}\n--- END EXISTING TEXT ---\n\nThis text stays exactly as it is, and your paragraphs will be appended after it. Write only NEW paragraphs that continue the section from where it ends. Do not repeat, restate, summarise or paraphrase anything already written. Keep the researcher's argument, voice and terminology, and do not contradict them.\n\nIf the sources contain nothing that adds to what is already written, reply with exactly ${NO_NEW_MATERIAL} and nothing else.`
     : 'The researcher has not drafted this section yet. Produce a first draft they can build on.'
 }
 
 Requirements:
-- Three to five paragraphs of continuous academic prose. No bullet lists, no headings.
-- Every substantive claim must be supported by a source, cited inline as [S1], [S2].
-- Where the available sources are insufficient for this section, end with a single short paragraph beginning "Evidence gap:" naming precisely what is missing.
+- ${existing ? 'One to three' : 'Three to five'} paragraphs of continuous academic prose. No bullet lists, no headings.
+- Every substantive claim must be supported by a source, cited inline as [S1], or [S1, S2] for several.
+- Where the available sources are insufficient for this section, end with a single short paragraph beginning "Evidence gap:" naming precisely what is missing.${existing ? ' Do not repeat a gap the existing text already names.' : ''}
 - Do not fabricate citations, results, or references to work not present in the sources.`;
 }

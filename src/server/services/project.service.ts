@@ -104,8 +104,9 @@ export async function getProject(
             orderBy: { position: 'asc' },
             include: {
               citations: {
+                orderBy: { ordinal: 'asc' },
                 include: {
-                  paper: { select: { id: true, title: true } },
+                  paper: { select: { id: true, title: true, authors: true, year: true } },
                   note: { select: { id: true } },
                 },
               },

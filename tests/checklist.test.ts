@@ -117,4 +117,28 @@ describe('buildChecklist', () => {
     const empty = items.find((item) => item.id === 'empty-abc');
     expect(empty?.sectionId).toBe('abc');
   });
+
+  it('treats a citation that points at no source as an error', () => {
+    // A fabricated citation in a thesis is worse than a missing one: it looks
+    // supported when it is not.
+    const items = buildChecklist({
+      sections: [
+        section({ id: 'a', userContent: SUBSTANTIAL, _citationCount: 2, _brokenCitationCount: 1 }),
+      ],
+      paperCount: 1,
+      noteCount: 1,
+    });
+
+    expect(items.find((item) => item.id === 'broken-a')?.severity).toBe('error');
+  });
+
+  it('does not report broken citations when there are none', () => {
+    const items = buildChecklist({
+      sections: [section({ id: 'a', userContent: SUBSTANTIAL, _citationCount: 2 })],
+      paperCount: 1,
+      noteCount: 1,
+    });
+
+    expect(items.some((item) => item.id === 'broken-a')).toBe(false);
+  });
 });

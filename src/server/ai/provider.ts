@@ -30,8 +30,16 @@ import { AppError } from '@/lib/errors';
  */
 
 const REQUEST_TIMEOUT_MS = 60_000;
-const MAX_ATTEMPTS = 3;
-const BASE_BACKOFF_MS = 500;
+
+/**
+ * Retry budget for transient failures. Sized for provider demand spikes, which
+ * return 503 for several seconds at a time: three attempts starting at 500ms
+ * gave up after about two seconds in live testing. Four attempts from one
+ * second waits roughly 1s, 2s and 4s — acceptable behind a spinner, and far
+ * better than failing a draft the user explicitly asked for.
+ */
+const MAX_ATTEMPTS = 4;
+const BASE_BACKOFF_MS = 1_000;
 
 /** Embedding requests are batched; the API rejects oversized batches. */
 const EMBED_BATCH_SIZE = 64;

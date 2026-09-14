@@ -154,6 +154,9 @@ model Paper {
 
   extractedText String?
   pageCount     Int?
+  /// JSON `[page, offset][]` locating each page within `extractedText`. Null
+  /// for formats without pages, and for papers extracted before page tracking.
+  pageStarts    String?
 
   // AI-generated analysis, populated during ingestion.
   plainSummary String?
@@ -187,6 +190,9 @@ model Chunk {
   content String
   /// Ordinal within the source document, for reassembling reading order.
   position Int
+  /// Source pages the passage spans. Null for notes and page-less formats.
+  pageStart Int?
+  pageEnd   Int?
   /// Raw little-endian Float32 vector. Null if embedding failed or is pending.
   embedding Bytes?
 
@@ -213,12 +219,23 @@ model CitationLink {
   noteId  String?
   note    Note?   @relation(fields: [noteId], references: [id], onDelete: SetNull)
 
+  /// The `n` in the section's `[Sn]` markers. Stable for the life of the
+  /// section: a later draft reuses it for the same passage and numbers new
+  /// passages after it, so accepted prose never has its markers repointed.
+  ordinal Int?
+  /// One of CITATION_STATUSES: `pending` belongs to an unreviewed draft and is
+  /// replaced or discarded with it; `accepted` backs prose in the document.
+  status  String @default("pending")
+
   /// Snapshot of the grounding text, retained even if the chunk is deleted.
-  quote String?
+  quote     String?
+  /// Snapshot of the pages the passage spans, retained with the quote.
+  pageStart Int?
+  pageEnd   Int?
 
   createdAt DateTime @default(now())
 
-  @@index([sectionId])
+  @@index([sectionId, status])
 }
 
 model ChatMessage {
