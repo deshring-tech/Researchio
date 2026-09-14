@@ -4,70 +4,23 @@ import type { Instrumentation } from 'next';
  * MODULE: instrumentation
  *
  * Purpose
- *   Server lifecycle hooks: startup logging, graceful shutdown, and a single
- *   funnel for uncaught server errors.
+ *   Server lifecycle hooks: startup, graceful shutdown, and a single funnel for
+ *   uncaught server errors.
  *
- * Runtime guard
- *   `register` also runs in the Edge runtime, where node:process signals and
- *   Prisma are unavailable. Every Node-only import is therefore dynamic and
- *   guarded by `NEXT_RUNTIME`.
+ * Runtime split
+ *   Next.js calls `register` in every runtime, including Edge, where
+ *   `process.on` and Prisma do not exist. Node-only setup therefore lives in
+ *   `instrumentation-node.ts` and is imported only on the Node runtime, as the
+ *   Next.js instrumentation guide prescribes. A runtime check around inline code
+ *   is not enough: the bundler still traces those Node APIs into the Edge build
+ *   and reports them as errors.
  */
 
 export async function register(): Promise<void> {
-  if (process.env.NEXT_RUNTIME !== 'nodejs') {
-    return;
+  if (process.env.NEXT_RUNTIME === 'nodejs') {
+    const { registerNodeRuntime } = await import('./instrumentation-node');
+    registerNodeRuntime();
   }
-
-  const { logger } = await import('@/server/observability/logger');
-  const { prisma } = await import('@/server/db/prisma');
-  const { aiEnabled } = await import('@/server/ai/provider');
-
-  logger.info('Server starting', {
-    nodeEnv: process.env.NODE_ENV,
-    aiConfigured: aiEnabled(),
-  });
-
-  /**
-   * Graceful shutdown.
-   *
-   * SQLite is a file the process writes to directly, so being SIGKILLed
-   * mid-write risks a torn database. Disconnecting Prisma first lets it finish
-   * and close its handles. Container runtimes send SIGTERM and then wait
-   * (docker-compose is configured for 30s), which is ample.
-   */
-  let shuttingDown = false;
-
-  const shutdown = async (signal: NodeJS.Signals) => {
-    // Orchestrators sometimes send a second signal; re-entering here would
-    // disconnect twice and throw during teardown.
-    if (shuttingDown) {
-      return;
-    }
-    shuttingDown = true;
-
-    logger.info('Shutting down', { signal });
-
-    try {
-      await prisma.$disconnect();
-    } catch (error) {
-      logger.error('Failed to close the database cleanly', error);
-    }
-
-    process.exit(0);
-  };
-
-  process.on('SIGTERM', () => void shutdown('SIGTERM'));
-  process.on('SIGINT', () => void shutdown('SIGINT'));
-
-  // A rejected promise nobody awaited would otherwise terminate the process in
-  // recent Node versions with no usable log line.
-  process.on('unhandledRejection', (reason) => {
-    logger.error('Unhandled promise rejection', reason);
-  });
-
-  process.on('uncaughtException', (error) => {
-    logger.error('Uncaught exception', error);
-  });
 }
 
 /**
