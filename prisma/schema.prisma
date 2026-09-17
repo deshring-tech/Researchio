@@ -112,7 +112,8 @@ model Section {
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
 
-  citations CitationLink[]
+  citations    CitationLink[]
+  claimReports ClaimReport[]
 
   @@index([documentId, position])
 }
@@ -236,6 +237,31 @@ model CitationLink {
   createdAt DateTime @default(now())
 
   @@index([sectionId, status])
+}
+
+/// The result of checking a section's cited claims against the passages they
+/// cite. One row per section and target; checking again replaces it.
+model ClaimReport {
+  id        String  @id @default(uuid())
+  sectionId String
+  section   Section @relation(fields: [sectionId], references: [id], onDelete: Cascade)
+
+  /// One of CLAIM_CHECK_TARGETS: `draft` (the pending AI proposal) or
+  /// `document` (the accepted prose).
+  target        String
+  /// SHA-256 of the exact text checked. A mismatch with the current text means
+  /// the report is stale and its offsets no longer apply.
+  contentHash   String
+  /// One of CLAIM_CHECK_STATUSES: running | complete | failed
+  status        String  @default("running")
+  statusMessage String?
+  /// JSON `ClaimResult[]`. Offsets refer to the text `contentHash` describes.
+  results       String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([sectionId, target])
 }
 
 model ChatMessage {

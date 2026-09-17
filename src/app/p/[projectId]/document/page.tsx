@@ -10,7 +10,9 @@ import {
   toCitationView,
   type ChecklistSeverity,
 } from '@/server/services/document.service';
+import { toClaimReportView } from '@/server/services/verification.service';
 import { aiEnabled } from '@/server/ai/provider';
+import { countDisputedClaims, type ClaimCheckTarget } from '@/lib/domain/claims';
 import { wordCount } from '@/lib/format';
 import { citedOrdinals, countBrokenCitations } from '@/lib/text/citations';
 
@@ -32,13 +34,25 @@ export default async function DocumentPage({
   const user = await requireUser();
   const project = await getProject(projectId, user.id);
 
-  const sections = (project.document?.sections ?? []).map((section) => ({
-    ...section,
-    citationViews: section.citations.flatMap((row) => {
-      const view = toCitationView(row);
-      return view ? [view] : [];
-    }),
-  }));
+  const sections = (project.document?.sections ?? []).map((section) => {
+    // Each report is judged against the exact stored text it would annotate.
+    const reportFor = (target: ClaimCheckTarget, text: string | null) => {
+      const row = section.claimReports.find((report) => report.target === target);
+      return row && text ? toClaimReportView(row, text) : null;
+    };
+
+    return {
+      ...section,
+      citationViews: section.citations.flatMap((row) => {
+        const view = toCitationView(row);
+        return view ? [view] : [];
+      }),
+      claimReportViews: {
+        document: reportFor('document', section.userContent),
+        draft: reportFor('draft', section.aiContent),
+      },
+    };
+  });
 
   const showChecklist = tab === 'checklist';
 
@@ -58,6 +72,7 @@ export default async function DocumentPage({
         status: section.status,
         _citationCount: citedOrdinals(content).filter((ordinal) => accepted.has(ordinal)).length,
         _brokenCitationCount: countBrokenCitations(content, accepted),
+        _disputedClaimCount: countDisputedClaims(section.claimReportViews.document),
       };
     }),
     paperCount: project.papers.length,
@@ -132,6 +147,7 @@ export default async function DocumentPage({
                   aiContent: section.aiContent,
                   status: section.status,
                   citations: section.citationViews,
+                  claimReports: section.claimReportViews,
                 }}
               />
             ))

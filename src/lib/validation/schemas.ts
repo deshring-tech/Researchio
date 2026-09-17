@@ -1,5 +1,6 @@
 import { z } from 'zod';
 
+import { CLAIM_CHECK_TARGETS } from '@/lib/domain/claims';
 import { DOCUMENT_TYPES, SECTION_STATUSES } from '@/lib/domain/constants';
 import { type FieldErrors, invalid } from '@/lib/errors';
 
@@ -172,6 +173,11 @@ export const setSectionStatusSchema = z.object({
 export const reorderSectionSchema = z.object({
   sectionId: z.uuid(),
   direction: z.enum(['up', 'down']),
+});
+
+export const checkClaimsSchema = z.object({
+  sectionId: z.uuid(),
+  target: z.enum(CLAIM_CHECK_TARGETS),
 });
 
 // ---------------------------------------------------------------------------

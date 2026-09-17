@@ -71,6 +71,7 @@ Citations are built to be checked, not just displayed:
 - **Page-level.** PDFs are extracted page by page, so every passage — and every citation to it — records the pages it came from. Clicking a marker jumps to its source entry, which quotes the passage and opens the original PDF at that page.
 - **Stable.** A citation's number is fixed for the life of its section. Later drafts reuse it for the same passage and number new sources after it, and only an unreviewed draft's citations are ever replaced or discarded.
 - **Honest.** A marker that points at no supplied source renders as `?` and appears on the completion checklist, rather than being quietly dropped.
+- **Checked.** Every cited sentence is checked against the passage it cites, and judged supported, partly supported, unsupported or contradicted. Flagged sentences are underlined with the checker's reason and listed for review. Figures stated with no citation are flagged too. Checks run automatically after drafting, accepting and saving, and each claim is cached by its wording and evidence, so only changed claims reach the model.
 - **Additive.** "Extend with AI" asks for new paragraphs only, and any paragraph that restates what the section already says is removed before it is shown, so accepting an extension cannot duplicate prose.
 - **Exportable.** Markdown export turns markers into numbered footnotes with page references and a reference list, which Pandoc carries through to Word or LaTeX.
 
@@ -100,9 +101,9 @@ Two rules keep this honest:
 |---|---|
 | `npm run dev` | Development server |
 | `npm run build` / `npm start` | Production build and serve |
-| `npm run test` | 159 unit tests over the pure modules |
+| `npm run test` | 185 unit tests over the pure modules |
 | `npm run verify` | Typecheck, lint, unit tests, production build |
-| `npm run verify:e2e` | 123 assertions against the real stack (server must be running) |
+| `npm run verify:e2e` | 135 assertions against the real stack (server must be running) |
 | `npm run ai:check` | Live provider check — confirms the configured models still exist |
 | `npm run db:migrate` | Create and apply a migration after editing the schema |
 | `npm run db:studio` | Browse the database |
@@ -179,6 +180,7 @@ Stated plainly, because a tool that overstates itself is worse than one that doe
 - **Papers are capped at 200 per project in the list view.** Notes paginate properly; papers do not yet.
 - **PDFs indexed before page tracking have no page numbers** until re-processed with the "Add page numbers" action on the Sources page. Citations made before that keep their quote but name no page.
 - **Restatement filtering is lexical.** It removes verbatim and near-verbatim repetition from extensions; a model that paraphrases the existing text freely can still slip past it.
+- **Claim checks are only as good as the citation.** A sentence is judged against the passages it cites and nothing else, so a true claim attached to the wrong passage is reported as unsupported. Claims with no citation are not checked, apart from stated figures.
 - **No password reset.** There is no email delivery, so a forgotten password cannot be recovered — only changed while signed in. Adding it means introducing an email provider.
 - **`style-src` permits `unsafe-inline`.** The UI uses React inline styles throughout and `next/font` injects an inline style element. `script-src` — the directive that actually stops injected code — remains strict and nonce-only.
 
@@ -188,9 +190,9 @@ Stated plainly, because a tool that overstates itself is worse than one that doe
 
 Two layers, deliberately.
 
-`npm run test` — 159 Vitest unit tests over the pure modules: chunking and page mapping, citation parsing and renumbering, restatement detection, Markdown export, vector maths, checklist rules, password hashing, validation, datasource resolution. Fast, no I/O.
+`npm run test` — 185 Vitest unit tests over the pure modules: chunking and page mapping, citation parsing and renumbering, claim extraction, restatement detection, Markdown export, vector maths, checklist rules, password hashing, validation, datasource resolution. Fast, no I/O.
 
-`npm run verify:e2e` — 123 assertions against the real database and a live server:
+`npm run verify:e2e` — 135 assertions against the real database and a live server:
 
 - PDF text extraction, from a PDF generated in-memory during the run
 - Embedding round-trips through the database, including the unaligned-buffer case
@@ -202,6 +204,7 @@ Two layers, deliberately.
 - Health endpoint proving real database and filesystem reachability
 - Citation markers rendering as links to quoted, page-referenced sources, and exporting as footnotes
 - Discarding, accepting and editing a section leaving accepted provenance intact
+- Claim reports highlighting disputed sentences, flagging reports that no longer match the text, and reaching deterministic verdicts without a model call
 
 If port 3000 is taken on your machine, run the server elsewhere and point the suite at it with `VERIFY_BASE_URL=http://localhost:4321`.
 

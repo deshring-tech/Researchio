@@ -421,6 +421,91 @@ a.citation-marker:hover {
 }
 
 /* ------------------------------------------------------------------ */
+/* Claim verification                                                  */
+/* ------------------------------------------------------------------ */
+
+/*
+ * A flagged claim. The wavy underline carries the meaning; the tint only
+ * helps it stand out, and the verdict is also given in text for screen
+ * readers, so colour is never the sole signal.
+ */
+mark.claim {
+  background-color: transparent;
+  color: inherit;
+  text-decoration-line: underline;
+  text-decoration-style: wavy;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 4px;
+  text-decoration-skip-ink: none;
+  border-radius: 2px;
+}
+
+mark.claim-unsupported,
+mark.claim-contradicted,
+mark.claim-unresolved {
+  text-decoration-color: var(--error);
+  background-color: rgb(220 38 38 / 0.06);
+}
+
+mark.claim-partial {
+  text-decoration-color: var(--warning);
+  background-color: rgb(180 83 9 / 0.07);
+}
+
+mark.claim-uncited_figure {
+  text-decoration-color: var(--text-tertiary);
+  text-decoration-style: dotted;
+}
+
+.claim-report {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-2);
+  margin-top: var(--spacing-3);
+  font-family: var(--font-sans);
+  font-size: 0.8125rem;
+  white-space: normal;
+}
+
+.claim-report-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-2);
+  flex-wrap: wrap;
+  color: var(--text-secondary);
+}
+
+.claim-issues {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-2);
+}
+
+.claim-issues li {
+  padding: var(--spacing-2) var(--spacing-3);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  background-color: var(--bg-tertiary);
+}
+
+.claim-issues q {
+  display: block;
+  margin-top: var(--spacing-1);
+  font-family: var(--font-serif);
+  color: var(--text-primary);
+}
+
+.claim-reason {
+  display: block;
+  margin-top: 2px;
+  color: var(--text-secondary);
+}
+
+/* ------------------------------------------------------------------ */
 /* Buttons                                                             */
 /* ------------------------------------------------------------------ */
 

@@ -2,8 +2,10 @@
 
 import { useActionState, useState } from 'react';
 
+import { ClaimReportPanel } from '@/components/workspace/ClaimReportPanel';
 import { CitationList, CitedProse } from '@/components/workspace/CitedProse';
 import { SubmitButton } from '@/components/ui/SubmitButton';
+import { useRefreshWhile } from '@/hooks/useRefreshWhile';
 import {
   acceptDraftAction,
   deleteSectionAction,
@@ -14,6 +16,7 @@ import {
   updateSectionAction,
 } from '@/server/actions/document.actions';
 import type { SectionCitationView } from '@/lib/domain/citation';
+import type { ClaimReportView } from '@/lib/domain/claims';
 import {
   SECTION_STATUS_LABELS,
   asSectionStatus,
@@ -36,11 +39,12 @@ import type { ActionResult } from '@/lib/errors';
  *   into the researcher's text without an explicit accept. Accepting appends
  *   rather than overwrites, so no existing writing can be lost by a click.
  *
- * Citations
+ * Citations and claims
  *   Accepted prose is rendered against accepted citations only; the draft is
  *   rendered against all of them, since it may reuse ordinals already backing
  *   accepted prose. Each gets its own anchor prefix so the two source lists can
- *   share a page without colliding.
+ *   share a page. Claim checks run in the background; the card polls while one
+ *   is in progress and highlights flagged claims only from a current report.
  */
 
 export interface SectionView {
@@ -51,6 +55,10 @@ export interface SectionView {
   aiContent: string | null;
   status: string;
   citations: SectionCitationView[];
+  claimReports: {
+    document: ClaimReportView | null;
+    draft: ClaimReportView | null;
+  };
 }
 
 const STATUS_TONE: Record<SectionStatus, string> = {
@@ -59,6 +67,15 @@ const STATUS_TONE: Record<SectionStatus, string> = {
   reviewing: 'pill-warning',
   approved: 'pill-success',
 };
+
+/** Verdicts from a report that still describes the text, or none. */
+function currentClaims(report: ClaimReportView | null) {
+  return report?.fresh ? report.results : [];
+}
+
+function isChecking(report: ClaimReportView | null): boolean {
+  return report !== null && report.fresh && report.status === 'running' && !report.stalled;
+}
 
 export function SectionCard({
   section,
@@ -81,6 +98,11 @@ export function SectionCard({
   const [saveState, saveAction] = useActionState<ActionResult<undefined> | null, FormData>(
     updateSectionAction,
     null,
+  );
+
+  useRefreshWhile(
+    isChecking(section.claimReports.document) ||
+      (section.aiContent !== null && isChecking(section.claimReports.draft)),
   );
 
   const content = section.userContent?.trim() ?? '';
@@ -162,12 +184,19 @@ export function SectionCard({
                   text={content}
                   citations={accepted}
                   anchorPrefix={`doc-${section.id}`}
+                  claims={currentClaims(section.claimReports.document)}
                 />
               </div>
               <CitationList
                 text={content}
                 citations={accepted}
                 anchorPrefix={`doc-${section.id}`}
+              />
+              <ClaimReportPanel
+                sectionId={section.id}
+                target="document"
+                text={content}
+                report={section.claimReports.document}
               />
             </>
           ) : (
@@ -199,6 +228,7 @@ export function SectionCard({
           sectionId={section.id}
           draft={section.aiContent}
           citations={section.citations}
+          report={section.claimReports.draft}
         />
       ) : null}
 
@@ -238,10 +268,12 @@ function DraftProposal({
   sectionId,
   draft,
   citations,
+  report,
 }: {
   sectionId: string;
   draft: string;
   citations: SectionCitationView[];
+  report: ClaimReportView | null;
 }) {
   const [acceptState, accept] = useActionState<ActionResult<undefined> | null, FormData>(
     acceptDraftAction,
@@ -262,7 +294,12 @@ function DraftProposal({
       <span className="ai-draft-label">AI proposal · not yet part of your document</span>
 
       <div className="document-content" style={{ fontSize: '1rem' }}>
-        <CitedProse text={draft} citations={citations} anchorPrefix={`draft-${sectionId}`} />
+        <CitedProse
+          text={draft}
+          citations={citations}
+          anchorPrefix={`draft-${sectionId}`}
+          claims={currentClaims(report)}
+        />
       </div>
 
       <CitationList
@@ -271,6 +308,8 @@ function DraftProposal({
         anchorPrefix={`draft-${sectionId}`}
         heading="Grounded in"
       />
+
+      <ClaimReportPanel sectionId={sectionId} target="draft" text={draft} report={report} />
 
       {error ? (
         <p className="field-error" role="alert">

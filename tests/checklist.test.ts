@@ -141,4 +141,28 @@ describe('buildChecklist', () => {
 
     expect(items.some((item) => item.id === 'broken-a')).toBe(false);
   });
+
+  it('reports claims a check found unsupported by their sources', () => {
+    const items = buildChecklist({
+      sections: [
+        section({ id: 'a', userContent: SUBSTANTIAL, _citationCount: 2, _disputedClaimCount: 3 }),
+      ],
+      paperCount: 1,
+      noteCount: 1,
+    });
+
+    const disputed = items.find((item) => item.id === 'disputed-a');
+    expect(disputed?.severity).toBe('warning');
+    expect(disputed?.detail).toContain('3 claims');
+  });
+
+  it('does not report disputed claims when none were found', () => {
+    const items = buildChecklist({
+      sections: [section({ id: 'a', userContent: SUBSTANTIAL, _citationCount: 2, _disputedClaimCount: 0 })],
+      paperCount: 1,
+      noteCount: 1,
+    });
+
+    expect(items.some((item) => item.id === 'disputed-a')).toBe(false);
+  });
 });

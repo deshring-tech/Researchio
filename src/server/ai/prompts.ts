@@ -220,3 +220,72 @@ Requirements:
 - Where the available sources are insufficient for this section, end with a single short paragraph beginning "Evidence gap:" naming precisely what is missing.${existing ? ' Do not repeat a gap the existing text already names.' : ''}
 - Do not fabricate citations, results, or references to work not present in the sources.`;
 }
+
+// ---------------------------------------------------------------------------
+// Claim verification
+// ---------------------------------------------------------------------------
+
+export const CLAIM_CHECK_SYSTEM_INSTRUCTION = `You are a meticulous fact-checker for academic writing. You judge whether each claim is supported by the specific source passages it cites, and by nothing else.
+
+Rules you must always follow:
+- Judge only against the passages supplied for that claim. Do not use outside knowledge, even when you believe the claim is true.
+- "supported": every factual element of the claim — numbers, quantities, direction of an effect, scope, and causal or comparative language — is stated in or directly entailed by its passages.
+- "partial": some elements are supported, but at least one (for example a number, a qualifier, or a causal link) is not found in the passages.
+- "unsupported": the passages do not establish the claim.
+- "contradicted": the passages state something incompatible with the claim.
+- A claim that is vaguer than its passages but consistent with them is supported. A claim that is stronger, broader or more precise than its passages is not.
+- Give each reason as one short sentence naming the specific element at issue, quoting numbers exactly.`;
+
+/** JSON schema constraining the verifier's response. */
+export const CLAIM_CHECK_JSON_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  properties: {
+    verdicts: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          claim: { type: 'integer', description: 'The number of the claim being judged.' },
+          verdict: {
+            type: 'string',
+            enum: ['supported', 'partial', 'unsupported', 'contradicted'],
+          },
+          reason: {
+            type: 'string',
+            description: 'One short sentence naming the element at issue.',
+          },
+        },
+        required: ['claim', 'verdict', 'reason'],
+      },
+    },
+  },
+  required: ['verdicts'],
+};
+
+export function claimCheckPrompt(params: {
+  claims: ReadonlyArray<{ number: number; text: string; ordinals: readonly number[] }>;
+  passages: ReadonlyArray<{ ordinal: number; label: string; text: string }>;
+}): string {
+  const passages = params.passages
+    .map((passage) => `[S${passage.ordinal}] (${passage.label})\n${passage.text}`)
+    .join('\n\n');
+
+  const claims = params.claims
+    .map(
+      (claim) =>
+        `Claim ${claim.number} (cites ${claim.ordinals.map((ordinal) => `S${ordinal}`).join(', ')}): ${claim.text}`,
+    )
+    .join('\n');
+
+  return `Check each claim against the source passages it cites, and only those passages.
+
+--- SOURCE PASSAGES ---
+${passages}
+--- END SOURCE PASSAGES ---
+
+--- CLAIMS ---
+${claims}
+--- END CLAIMS ---
+
+Return exactly one verdict for every claim number listed above.`;
+}

@@ -1,7 +1,8 @@
 'use client';
 
-import { useActionState, useEffect } from 'react';
-import { useRouter } from 'next/navigation';
+import { useActionState } from 'react';
+
+import { useRefreshWhile } from '@/hooks/useRefreshWhile';
 
 import { SubmitButton } from '@/components/ui/SubmitButton';
 import { deletePaperAction, retryPaperAction } from '@/server/actions/paper.actions';
@@ -30,7 +31,6 @@ import type { ActionResult } from '@/lib/errors';
  *   that takes tens of seconds.
  */
 
-const POLL_INTERVAL_MS = 4_000;
 
 export interface PaperView {
   id: string;
@@ -64,21 +64,12 @@ const PILL_TONE: Record<IngestionStatus, string> = {
 };
 
 export function PaperList({ papers }: { papers: PaperView[] }) {
-  const router = useRouter();
-
   const isSettling = papers.some((paper) => {
     const status = asIngestionStatus(paper.status);
     return status === 'pending' || status === 'processing';
   });
 
-  useEffect(() => {
-    if (!isSettling) {
-      return;
-    }
-
-    const timer = setInterval(() => router.refresh(), POLL_INTERVAL_MS);
-    return () => clearInterval(timer);
-  }, [isSettling, router]);
+  useRefreshWhile(isSettling);
 
   return (
     <div className="grid-cards">

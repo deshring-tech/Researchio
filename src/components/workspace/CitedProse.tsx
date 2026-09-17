@@ -1,6 +1,7 @@
-import { Fragment } from 'react';
+import { Fragment, type ReactNode } from 'react';
 
 import type { CitationView } from '@/lib/domain/citation';
+import { CLAIM_VERDICT_LABELS, FLAGGED_VERDICTS, type ClaimResult } from '@/lib/domain/claims';
 import { citedOrdinals, parseCitations } from '@/lib/text/citations';
 import { formatPageRange } from '@/lib/text/pages';
 
@@ -8,8 +9,8 @@ import { formatPageRange } from '@/lib/text/pages';
  * MODULE: components/workspace/CitedProse
  *
  * Purpose
- *   Render prose with clickable source markers, and the numbered list of
- *   sources those markers point at.
+ *   Render prose with clickable source markers and highlighted claims, and the
+ *   numbered list of sources those markers point at.
  *
  * Design
  *   Footnote-style rather than popovers. Each marker is an in-page link to its
@@ -20,6 +21,10 @@ import { formatPageRange } from '@/lib/text/pages';
  *
  *   A marker that resolves to no source renders as a visible "?" rather than
  *   disappearing, so a fabricated citation is reviewed instead of disguised.
+ *
+ *   Claims a check flagged are underlined with the verdict as their tooltip,
+ *   and the verdict is repeated in text for screen readers. Supported claims
+ *   are left unmarked: highlighting everything would hide what needs review.
  *
  * Hook-free, so it renders in both Server and Client Components.
  *
@@ -56,63 +61,117 @@ function anchorId(prefix: string, ordinal: number): string {
   return `${prefix}-s${ordinal}`;
 }
 
+/** Renders a run of prose with its citation markers turned into links. */
+function renderMarkers(
+  text: string,
+  byOrdinal: ReadonlyMap<number, CitationView>,
+  anchorPrefix: string,
+  keyPrefix: string,
+): ReactNode[] {
+  return parseCitations(text).map((segment, index) => {
+    const key = `${keyPrefix}-${index}`;
+
+    if (segment.type === 'text') {
+      return <Fragment key={key}>{segment.value}</Fragment>;
+    }
+
+    const known = segment.ordinals.flatMap((ordinal) => {
+      const citation = byOrdinal.get(ordinal);
+      return citation ? [citation] : [];
+    });
+    const unresolved = segment.unresolved || known.length < segment.ordinals.length;
+
+    return (
+      <sup key={key} className="citation-group">
+        {known.map((citation, position) => (
+          <Fragment key={citation.ordinal}>
+            {position > 0 ? ' ' : null}
+            <a
+              className="citation-marker"
+              href={`#${anchorId(anchorPrefix, citation.ordinal)}`}
+              title={describeCitation(citation)}
+              aria-label={`Source ${citation.ordinal}: ${describeCitation(citation)}`}
+            >
+              {citation.ordinal}
+            </a>
+          </Fragment>
+        ))}
+        {unresolved ? (
+          <>
+            {known.length > 0 ? ' ' : null}
+            <span
+              className="citation-marker citation-unresolved"
+              title="This citation points to no source that was supplied. Check the claim before relying on it."
+            >
+              <span aria-hidden="true">?</span>
+              <span className="sr-only">Unresolved citation</span>
+            </span>
+          </>
+        ) : null}
+      </sup>
+    );
+  });
+}
+
 export function CitedProse({
   text,
   citations,
   anchorPrefix,
+  claims = [],
 }: {
   text: string;
   citations: readonly CitationView[];
   /** Must be unique on the page; source list entries are anchored under it. */
   anchorPrefix: string;
+  /** Results of a claim check that is current for exactly this text. */
+  claims?: readonly ClaimResult[];
 }) {
   const byOrdinal = new Map(citations.map((citation) => [citation.ordinal, citation]));
 
-  return (
-    <>
-      {parseCitations(text).map((segment, index) => {
-        if (segment.type === 'text') {
-          return <Fragment key={index}>{segment.value}</Fragment>;
-        }
+  const flagged = claims
+    .filter(
+      (claim) =>
+        FLAGGED_VERDICTS.has(claim.verdict) &&
+        claim.start < claim.end &&
+        claim.end <= text.length,
+    )
+    .sort((a, b) => a.start - b.start);
 
-        const known = segment.ordinals.flatMap((ordinal) => {
-          const citation = byOrdinal.get(ordinal);
-          return citation ? [citation] : [];
-        });
-        const unresolved = segment.unresolved || known.length < segment.ordinals.length;
+  const pieces: ReactNode[] = [];
+  let cursor = 0;
 
-        return (
-          <sup key={index} className="citation-group">
-            {known.map((citation, position) => (
-              <Fragment key={citation.ordinal}>
-                {position > 0 ? ' ' : null}
-                <a
-                  className="citation-marker"
-                  href={`#${anchorId(anchorPrefix, citation.ordinal)}`}
-                  title={describeCitation(citation)}
-                  aria-label={`Source ${citation.ordinal}: ${describeCitation(citation)}`}
-                >
-                  {citation.ordinal}
-                </a>
-              </Fragment>
-            ))}
-            {unresolved ? (
-              <>
-                {known.length > 0 ? ' ' : null}
-                <span
-                  className="citation-marker citation-unresolved"
-                  title="This citation points to no source that was supplied. Check the claim before relying on it."
-                >
-                  <span aria-hidden="true">?</span>
-                  <span className="sr-only">Unresolved citation</span>
-                </span>
-              </>
-            ) : null}
-          </sup>
-        );
-      })}
-    </>
-  );
+  flagged.forEach((claim, index) => {
+    // Claims are sentences and never overlap; a malformed report must not
+    // duplicate or drop text, so an overlapping range is simply not marked.
+    if (claim.start < cursor) {
+      return;
+    }
+
+    if (claim.start > cursor) {
+      pieces.push(...renderMarkers(text.slice(cursor, claim.start), byOrdinal, anchorPrefix, `t${index}`));
+    }
+
+    const label = CLAIM_VERDICT_LABELS[claim.verdict];
+
+    pieces.push(
+      <mark
+        key={`c${index}`}
+        className={`claim claim-${claim.verdict}`}
+        title={claim.reason ? `${label}: ${claim.reason}` : label}
+      >
+        {renderMarkers(text.slice(claim.start, claim.end), byOrdinal, anchorPrefix, `c${index}`)}
+        <span className="sr-only"> (flagged: {label})</span>
+      </mark>,
+    );
+
+    cursor = claim.end;
+  });
+
+  if (cursor < text.length) {
+    pieces.push(...renderMarkers(text.slice(cursor), byOrdinal, anchorPrefix, 'tail'));
+  }
+
+  return <>{pieces}</>;
 }
 
 export function CitationList({

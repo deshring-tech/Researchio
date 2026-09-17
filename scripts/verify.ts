@@ -1052,6 +1052,157 @@ async function verifyCitationProvenance(): Promise<void> {
   }
 }
 
+/**
+ * Claim verification: deterministic verdicts, how stored reports render,
+ * staleness, and the checklist.
+ *
+ * Model verdicts need a live provider, so a report carrying them is stored
+ * directly; everything that needs no model runs for real.
+ */
+async function verifyClaimReports(): Promise<void> {
+  const probe = await fetch(BASE_URL, { redirect: 'manual' }).catch(() => null);
+  if (!probe) {
+    console.log('  SKIP  dev server not reachable');
+    return;
+  }
+
+  const { createHash } = await import('node:crypto');
+  const { extractClaims } = await import('../src/lib/text/claims');
+  const { checkClaimsNow } = await import('../src/server/services/verification.service');
+  const sha = (text: string) => createHash('sha256').update(text).digest('hex');
+
+  const owner = await prisma.user.create({
+    data: {
+      email: `claims-${Date.now()}@researchio.local`,
+      name: 'Claims',
+      passwordHash: await hashPassword('irrelevant-value-here'),
+    },
+  });
+
+  try {
+    const deterministic =
+      'Regeneration succeeded in 85 percent of animals. Adult mammalian hearts regenerate fully [S?].';
+    const reviewed =
+      'Cardiomyocytes re-enter the cell cycle after injury [S1]. The heart regrows completely within forty-eight hours [S1].';
+
+    const project = await prisma.project.create({
+      data: {
+        ownerId: owner.id,
+        name: 'Claim Checks',
+        document: {
+          create: {
+            type: 'Thesis',
+            sections: {
+              create: [
+                { title: 'Results', position: 0, userContent: deterministic },
+                {
+                  title: 'Discussion',
+                  position: 1,
+                  status: 'drafting',
+                  userContent: reviewed,
+                  aiContent: 'The epicardium activates across the whole organ [S1].',
+                },
+              ],
+            },
+          },
+        },
+      },
+      include: { document: { include: { sections: { orderBy: { position: 'asc' } } } } },
+    });
+
+    const [results, discussion] = project.document!.sections;
+
+    await prisma.citationLink.create({
+      data: {
+        sectionId: discussion.id,
+        ordinal: 1,
+        status: 'accepted',
+        quote: 'Cardiomyocytes re-enter the cell cycle after amputation.',
+        pageStart: 3,
+        pageEnd: 3,
+      },
+    });
+
+    // --- Deterministic verdicts need no model call
+    const outcome = await checkClaimsNow(results.id, 'document');
+    const stored = await prisma.claimReport.findUnique({
+      where: { sectionId_target: { sectionId: results.id, target: 'document' } },
+    });
+    const verdicts = (JSON.parse(stored?.results ?? '[]') as Array<{ verdict: string }>).map(
+      (result) => result.verdict,
+    );
+
+    check(
+      'a check with nothing to ask the model makes no model call',
+      outcome?.sentToModel === 0,
+      JSON.stringify(outcome),
+    );
+    check('the claim check completes', stored?.status === 'complete', stored?.status);
+    check('an uncited figure is flagged', verdicts.includes('uncited_figure'), verdicts.join(', '));
+    check('a claim citing no source is flagged', verdicts.includes('unresolved'));
+    check('a report records the text it describes', stored?.contentHash === sha(deterministic));
+
+    // --- Stored model verdicts, and a stale report
+    const [supported, overstated] = extractClaims(reviewed);
+
+    await prisma.claimReport.createMany({
+      data: [
+        {
+          sectionId: discussion.id,
+          target: 'document',
+          contentHash: sha(reviewed),
+          status: 'complete',
+          results: JSON.stringify([
+            { start: supported.start, end: supported.end, ordinals: [1], verdict: 'supported', reason: 'Stated directly.', key: 'a' },
+            {
+              start: overstated.start,
+              end: overstated.end,
+              ordinals: [1],
+              verdict: 'unsupported',
+              reason: 'The passage gives no forty-eight hour timescale.',
+              key: 'b',
+            },
+          ]),
+        },
+        {
+          sectionId: discussion.id,
+          target: 'draft',
+          contentHash: sha('an earlier version of the draft'),
+          status: 'complete',
+          results: '[]',
+        },
+      ],
+    });
+
+    const cookie = await sessionCookieFor(owner.id);
+    const get = (path: string) =>
+      fetch(`${BASE_URL}${path}`, { headers: { Cookie: cookie }, redirect: 'manual' });
+
+    const html = await (await get(`/p/${project.id}/document`)).text();
+
+    check('an unsupported claim is highlighted', html.includes('class="claim claim-unsupported"'));
+    check("the checker's reason is shown", html.includes('The passage gives no forty-eight hour timescale.'));
+    check('a supported claim is left unmarked', !html.includes('claim claim-supported'));
+    check(
+      'deterministic flags are highlighted',
+      html.includes('class="claim claim-uncited_figure"') && html.includes('class="claim claim-unresolved"'),
+    );
+    check('the report summarises its verdicts', html.includes('2 claims checked'));
+    check(
+      'a report for text that has since changed says so',
+      html.includes('The text has changed since its claims were checked.'),
+    );
+
+    const checklistHtml = await (await get(`/p/${project.id}/document?tab=checklist`)).text();
+    check(
+      'the checklist reports claims their sources do not support',
+      checklistHtml.includes('has claims its sources do not support'),
+    );
+  } finally {
+    await prisma.user.delete({ where: { id: owner.id } });
+  }
+}
+
 /** The assistant must remain reachable when the side panel is hidden. */
 async function verifyAssistantReachable(): Promise<void> {
   const fs = await import('node:fs/promises');
@@ -1089,6 +1240,7 @@ async function main(): Promise<void> {
   await section(`HTTP surface (${BASE_URL})`, verifyHttp);
   await section('Authenticated workspace', verifyAuthenticatedPages);
   await section('Citation provenance', verifyCitationProvenance);
+  await section('Claim verification', verifyClaimReports);
 
   console.log('\n' + '='.repeat(40));
   console.log(`${passed} passed, ${failures.length} failed`);

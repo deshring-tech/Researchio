@@ -86,4 +86,11 @@ export const RATE_LIMITS = {
   chat: { limit: 30, windowMs: 60_000 },
   /** Section drafting is markedly more expensive than a chat turn. */
   draft: { limit: 15, windowMs: 60_000 },
+  /** Manual claim checks requested by a user. */
+  verify: { limit: 20, windowMs: 60_000 },
+  /**
+   * Automatic claim checks per section, triggered by drafts, accepts and saves.
+   * Caching keeps each one cheap; this caps a save loop.
+   */
+  verifyAutomatic: { limit: 30, windowMs: 60_000 },
 } as const;

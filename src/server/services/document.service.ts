@@ -519,6 +519,8 @@ interface ChecklistInput {
     _citationCount: number;
     /** Markers in the prose that resolve to no source. */
     _brokenCitationCount?: number;
+    /** Claims a current check found partly supported, unsupported or contradicted. */
+    _disputedClaimCount?: number;
   }>;
   paperCount: number;
   noteCount: number;
@@ -568,6 +570,17 @@ export function buildChecklist(input: ChecklistInput): ChecklistItem[] {
         severity: 'error',
         title: `"${section.title}" has citations that point to no source`,
         detail: `${broken} citation${broken === 1 ? '' : 's'} cannot be traced to a source. Check those claims before relying on them.`,
+        sectionId: section.id,
+      });
+    }
+
+    const disputed = section._disputedClaimCount ?? 0;
+    if (disputed > 0) {
+      items.push({
+        id: `disputed-${section.id}`,
+        severity: 'warning',
+        title: `"${section.title}" has claims its sources do not support`,
+        detail: `${disputed} claim${disputed === 1 ? ' goes' : 's go'} beyond or against the passage${disputed === 1 ? '' : 's'} cited. Review ${disputed === 1 ? 'it' : 'them'} before relying on this section.`,
         sectionId: section.id,
       });
     }

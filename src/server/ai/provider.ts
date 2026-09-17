@@ -150,6 +150,16 @@ function normalizeError(error: unknown, label: string): AppError {
     });
   }
 
+  // Capacity errors are temporary and not the user's doing; saying so tells
+  // them that simply trying again later is the right response.
+  if (/\b(429|503)\b|high demand|overloaded|resource.?exhausted|rate.?limit/i.test(message)) {
+    return new AppError(
+      'AI_UNAVAILABLE',
+      'The AI provider is overloaded right now. Try again in a minute.',
+      { cause: error },
+    );
+  }
+
   return new AppError('AI_UNAVAILABLE', `The AI provider failed during ${label}.`, {
     cause: error,
   });

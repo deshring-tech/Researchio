@@ -103,6 +103,7 @@ export async function getProject(
           sections: {
             orderBy: { position: 'asc' },
             include: {
+              claimReports: true,
               citations: {
                 orderBy: { ordinal: 'asc' },
                 include: {
